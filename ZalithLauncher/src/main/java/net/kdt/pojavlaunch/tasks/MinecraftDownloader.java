@@ -24,38 +24,35 @@ import net.kdt.pojavlaunch.value.DependentLibrary;
 import net.kdt.pojavlaunch.value.MinecraftClientInfo;
 import net.kdt.pojavlaunch.value.MinecraftLibraryArtifact;
 
+import org.apache.commons.io.FilenameUtils;
+
 import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.ArrayBlockingQueue;
-import java.util.concurrent.ThreadPoolExecutor;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.Callable;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorCompletionService;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.TimeUnit;
 
 public class MinecraftDownloader {
-    private static final double ONE_MEGABYTE = (1024d * 1024d);
+    private static final double ONE_MEGABYTE = 1024d * 1024d;
     public static final String MINECRAFT_RES = "https://resources.download.minecraft.net/";
     private static final String MAVEN_CENTRAL_REPO1 = "https://repo1.maven.org/maven2/";
-
-    private AtomicReference<Exception> mDownloaderThreadException;
-    private ArrayList<DownloaderTask> mScheduledDownloadTasks;
-    private ArrayList<File> mDeclaredNatives;
-    private AtomicLong mProcessedFileCounter;
-    private AtomicLong mProcessedSizeCounter; // Total bytes of processed files (passed SHA1 or downloaded)
-    private AtomicLong mInternetUsageCounter; // Total bytes downloaded over the internet
-    private long mTotalFileCount;
-    private long mTotalSize;
-    private File mSourceJarFile; // Source client JAR selected during inheritance processing
-    private File mTargetJarFile; // Destination client JAR for the current version folder
-    private boolean mUseFileCounter; // Whether progress is tracked by file count instead of total size
-
-    private static final ThreadLocal<byte[]> sThreadLocalDownloadBuffer = new ThreadLocal<>();
+    private static final ThreadLocal<byte[]> THREAD_LOCAL_DOWNLOAD_BUFFER = new ThreadLocal<>();
 
     /**
-     * Starts the game version download process on the global executor service.
+     * Starts the game version download process.
      *
      * Important:
      * This downloader should only download and refresh the versions cache.
@@ -64,14 +61,12 @@ public class MinecraftDownloader {
      * create the final loader version afterward.
      *
      * The final installer flow should decide which version becomes selected.
-     *
-     * @param version The version entry from the remote version list, if available
-     * @param realVersion The version ID
-     * @param listener The download status listener
      */
-    public void start(@Nullable JMinecraftVersionList.Version version,
-                      @NonNull String realVersion,
-                      @NonNull AsyncMinecraftDownloader.DoneListener listener) {
+    public void start(
+            @Nullable JMinecraftVersionList.Version version,
+            @NonNull String realVersion,
+            @NonNull AsyncMinecraftDownloader.DoneListener listener
+    ) {
         Task.runTask(() -> {
                     downloadGame(version, realVersion);
 
@@ -81,105 +76,200 @@ public class MinecraftDownloader {
 
                     listener.onDownloadDone();
                     return null;
-                }).onThrowable(listener::onDownloadFailed)
+                })
+                .onThrowable(listener::onDownloadFailed)
                 .finallyTask(() -> ProgressLayout.clearProgress(ProgressLayout.DOWNLOAD_MINECRAFT))
                 .execute();
     }
 
-    /**
-     * Downloads the game version.
-     *
-     * @param verInfo The version entry from the version list, if available
-     * @param versionName The version ID
-     * @throws Exception if an error occurs here or in one of the downloader threads
-     */
-    private void downloadGame(JMinecraftVersionList.Version verInfo, String versionName) throws Exception {
-        ProgressLayout.setProgress(ProgressLayout.DOWNLOAD_MINECRAFT, 0, R.string.newdl_starting);
+    private void downloadGame(
+            @Nullable JMinecraftVersionList.Version listedVersion,
+            @NonNull String versionName
+    ) throws Exception {
+        ProgressLayout.setProgress(
+                ProgressLayout.DOWNLOAD_MINECRAFT,
+                0,
+                R.string.newdl_starting
+        );
 
-        SpeedCalculator speedCalculator = new SpeedCalculator();
+        DownloadPlan plan = buildDownloadPlan(listedVersion, versionName);
+        DownloadStats stats = new DownloadStats(plan.totalFileCount, plan.totalSize, plan.useFileCounter);
 
-        mTargetJarFile = createGameJarPath(versionName);
-        mScheduledDownloadTasks = new ArrayList<>();
-        mDeclaredNatives = new ArrayList<>();
-        mProcessedFileCounter = new AtomicLong(0);
-        mProcessedSizeCounter = new AtomicLong(0);
-        mInternetUsageCounter = new AtomicLong(0);
-        mDownloaderThreadException = new AtomicReference<>(null);
-        mUseFileCounter = false;
+        executePlan(plan, stats);
+        ensureJarFileCopy(plan);
+        extractNatives(plan);
+    }
 
-        downloadAndProcessMetadata(verInfo, versionName);
+    private DownloadPlan buildDownloadPlan(
+            @Nullable JMinecraftVersionList.Version listedVersion,
+            @NonNull String versionName
+    ) throws Exception {
+        PlanBuilder builder = new PlanBuilder(createGameJarPath(versionName));
+        collectMetadataAndSchedule(builder, listedVersion, versionName);
+        return builder.build();
+    }
 
-        ThreadPoolExecutor downloaderPool = createThreadPoolExecutor();
+    private void collectMetadataAndSchedule(
+            @NonNull PlanBuilder builder,
+            @Nullable JMinecraftVersionList.Version listedVersion,
+            @NonNull String versionName
+    ) throws Exception {
+        File versionJsonFile;
 
-        for (DownloaderTask scheduledTask : mScheduledDownloadTasks) {
-            downloaderPool.execute(scheduledTask);
+        if (listedVersion != null) {
+            versionJsonFile = downloadGameJson(listedVersion);
+        } else {
+            versionJsonFile = createGameJsonPath(versionName);
         }
-        downloaderPool.shutdown();
+
+        if (!versionJsonFile.isFile() || !versionJsonFile.canRead()) {
+            throw new IOException("Unable to read version JSON for version " + versionName);
+        }
+
+        JMinecraftVersionList.Version resolvedVersion =
+                Tools.GLOBAL_GSON.fromJson(Tools.read(versionJsonFile), JMinecraftVersionList.Version.class);
+
+        if (resolvedVersion == null) {
+            throw new IOException("Unable to parse version JSON for version " + versionName);
+        }
+
+        JAssets assets = downloadAssetsIndex(resolvedVersion);
+        if (assets != null) {
+            scheduleAssetDownloads(builder, assets);
+        }
+
+        MinecraftClientInfo clientInfo = getClientInfo(resolvedVersion);
+        if (clientInfo != null) {
+            scheduleGameJarDownload(builder, clientInfo, versionName);
+        }
+
+        if (resolvedVersion.libraries != null) {
+            scheduleLibraryDownloads(builder, resolvedVersion.libraries);
+        }
+
+        if (Tools.isValidString(resolvedVersion.inheritsFrom)) {
+            JMinecraftVersionList.Version inheritedListedVersion =
+                    AsyncMinecraftDownloader.getListedVersion(resolvedVersion.inheritsFrom);
+            collectMetadataAndSchedule(builder, inheritedListedVersion, resolvedVersion.inheritsFrom);
+        }
+    }
+
+    private void executePlan(@NonNull DownloadPlan plan, @NonNull DownloadStats stats) throws Exception {
+        if (plan.entries.isEmpty()) {
+            reportProgress(stats, 0d);
+            return;
+        }
+
+        int threadCount = Math.max(
+                1,
+                Math.min(AllSettings.getMaxDownloadThreads().getValue(), plan.entries.size())
+        );
+
+        ExecutorService executor = Executors.newFixedThreadPool(threadCount, new NamedThreadFactory("MCDownloader"));
+        ExecutorCompletionService<Void> completionService = new ExecutorCompletionService<>(executor);
+        List<Future<Void>> futures = new ArrayList<>(plan.entries.size());
+        SpeedCalculator speedCalculator = new SpeedCalculator();
+        ConcurrentLinkedQueue<Throwable> failures = new ConcurrentLinkedQueue<>();
 
         try {
-            while (mDownloaderThreadException.get() == null &&
-                    !downloaderPool.awaitTermination(33, TimeUnit.MILLISECONDS)) {
-                double speed = speedCalculator.feed(mInternetUsageCounter.get()) / ONE_MEGABYTE;
-                if (mUseFileCounter) {
-                    reportProgressFileCounter(speed);
-                } else {
-                    reportProgressSizeCounter(speed);
+            for (DownloadEntry entry : plan.entries) {
+                futures.add(completionService.submit(new DownloaderTask(entry, stats, failures)));
+            }
+
+            int completed = 0;
+            while (completed < plan.entries.size()) {
+                Future<Void> future = completionService.poll(100, TimeUnit.MILLISECONDS);
+
+                double speed = speedCalculator.feed(stats.internetUsageCounter.get()) / ONE_MEGABYTE;
+                reportProgress(stats, speed);
+
+                if (future == null) {
+                    continue;
+                }
+
+                try {
+                    future.get();
+                    completed++;
+                } catch (ExecutionException e) {
+                    Throwable cause = e.getCause() != null ? e.getCause() : e;
+                    failures.add(cause);
+                    cancelAll(futures);
+                    executor.shutdownNow();
+                    throw asException(cause);
+                } catch (CancellationException e) {
+                    failures.add(e);
+                    executor.shutdownNow();
+                    throw e;
                 }
             }
 
-            Exception thrownException = mDownloaderThreadException.get();
-            if (thrownException != null) {
-                throw thrownException;
-            } else {
-                ensureJarFileCopy();
-                extractNatives(versionName);
-            }
+            double finalSpeed = speedCalculator.feed(stats.internetUsageCounter.get()) / ONE_MEGABYTE;
+            reportProgress(stats, finalSpeed);
         } catch (InterruptedException e) {
-            downloaderPool.shutdownNow();
+            cancelAll(futures);
+            executor.shutdownNow();
+            Thread.currentThread().interrupt();
+            throw e;
+        } finally {
+            executor.shutdownNow();
+        }
+
+        Throwable failure = failures.peek();
+        if (failure != null) {
+            throw asException(failure);
+        }
+    }
+
+    private void cancelAll(@NonNull List<Future<Void>> futures) {
+        for (Future<Void> future : futures) {
+            future.cancel(true);
         }
     }
 
     @NonNull
-    private ThreadPoolExecutor createThreadPoolExecutor() {
-        int maxThreads = AllSettings.getMaxDownloadThreads().getValue();
-        if (mScheduledDownloadTasks.size() <= maxThreads) {
-            maxThreads = mScheduledDownloadTasks.size();
+    private Exception asException(@NonNull Throwable throwable) {
+        if (throwable instanceof Exception) {
+            return (Exception) throwable;
         }
-
-        return new ThreadPoolExecutor(
-                Math.max(1, (int) (maxThreads / 2)),
-                maxThreads,
-                500,
-                TimeUnit.MILLISECONDS,
-                new ArrayBlockingQueue<>(mScheduledDownloadTasks.size(), false)
-        );
+        return new RuntimeException(throwable);
     }
 
-    private void reportProgressFileCounter(double speed) {
-        long dlFileCounter = mProcessedFileCounter.get();
-        int progress = (int) ((dlFileCounter * 100L) / mTotalFileCount);
+    private void reportProgress(@NonNull DownloadStats stats, double speed) {
+        if (stats.useFileCounter || stats.totalSize <= 0) {
+            reportProgressByFileCount(stats, speed);
+        } else {
+            reportProgressBySize(stats, speed);
+        }
+    }
+
+    private void reportProgressByFileCount(@NonNull DownloadStats stats, double speed) {
+        long processedFiles = stats.processedFileCounter.get();
+        long totalFiles = Math.max(1, stats.totalFileCount);
+        int progress = (int) ((processedFiles * 100L) / totalFiles);
+
         ProgressLayout.setProgress(
                 ProgressLayout.DOWNLOAD_MINECRAFT,
                 progress,
                 R.string.newdl_downloading_game_files,
-                dlFileCounter,
-                mTotalFileCount,
+                processedFiles,
+                totalFiles,
                 speed
         );
     }
 
-    private void reportProgressSizeCounter(double speed) {
-        long dlFileSize = mProcessedSizeCounter.get();
-        double dlSizeMegabytes = (double) dlFileSize / ONE_MEGABYTE;
-        double dlTotalMegabytes = (double) mTotalSize / ONE_MEGABYTE;
-        int progress = (int) ((dlFileSize * 100L) / mTotalSize);
+    private void reportProgressBySize(@NonNull DownloadStats stats, double speed) {
+        long processedBytes = stats.processedSizeCounter.get();
+        long totalBytes = Math.max(1L, stats.totalSize);
+        double processedMb = processedBytes / ONE_MEGABYTE;
+        double totalMb = totalBytes / ONE_MEGABYTE;
+        int progress = (int) ((processedBytes * 100L) / totalBytes);
 
         ProgressLayout.setProgress(
                 ProgressLayout.DOWNLOAD_MINECRAFT,
                 progress,
                 R.string.newdl_downloading_game_files_size,
-                dlSizeMegabytes,
-                dlTotalMegabytes,
+                processedMb,
+                totalMb,
                 speed
         );
     }
@@ -192,20 +282,31 @@ public class MinecraftDownloader {
         return new File(ProfilePathHome.getVersionsHome(), versionId + File.separator + versionId + ".jar");
     }
 
-    private void ensureJarFileCopy() throws IOException {
-        if (mSourceJarFile == null) return;
-        if (mSourceJarFile.equals(mTargetJarFile)) return;
-        if (mTargetJarFile.exists()) return;
+    private void ensureJarFileCopy(@NonNull DownloadPlan plan) throws IOException {
+        if (plan.sourceJarFile == null) {
+            return;
+        }
+        if (plan.sourceJarFile.equals(plan.targetJarFile)) {
+            return;
+        }
+        if (plan.targetJarFile.exists()) {
+            return;
+        }
 
-        FileUtils.ensureParentDirectory(mTargetJarFile);
-        Logging.i("NewMCDownloader", "Copying " + mSourceJarFile.getName() + " to " + mTargetJarFile.getAbsolutePath());
-        org.apache.commons.io.FileUtils.copyFile(mSourceJarFile, mTargetJarFile, false);
+        FileUtils.ensureParentDirectory(plan.targetJarFile);
+        Logging.i(
+                "MinecraftDownloader",
+                "Copying " + plan.sourceJarFile.getName() + " to " + plan.targetJarFile.getAbsolutePath()
+        );
+        org.apache.commons.io.FileUtils.copyFile(plan.sourceJarFile, plan.targetJarFile, false);
     }
 
-    private void extractNatives(String versionName) throws IOException {
-        if (mDeclaredNatives.isEmpty()) return;
+    private void extractNatives(@NonNull DownloadPlan plan) throws IOException {
+        if (plan.declaredNatives.isEmpty()) {
+            return;
+        }
 
-        int totalCount = mDeclaredNatives.size();
+        int totalCount = plan.declaredNatives.size();
         ProgressLayout.setProgress(
                 ProgressLayout.DOWNLOAD_MINECRAFT,
                 0,
@@ -214,15 +315,16 @@ public class MinecraftDownloader {
                 totalCount
         );
 
-        File targetDirectory = new File(PathManager.DIR_CACHE, "natives/" + versionName);
+        File targetDirectory = new File(PathManager.DIR_CACHE, "natives/" + FilenameUtils.getBaseName(plan.targetJarFile.getName()));
         FileUtils.ensureDirectory(targetDirectory);
 
-        NativesExtractor nativesExtractor = new NativesExtractor(targetDirectory);
+        NativesExtractor extractor = new NativesExtractor(targetDirectory);
         int extractedCount = 0;
 
-        for (File source : mDeclaredNatives) {
-            nativesExtractor.extractFromAar(source);
+        for (File source : plan.declaredNatives) {
+            extractor.extractFromAar(source);
             extractedCount++;
+
             ProgressLayout.setProgress(
                     ProgressLayout.DOWNLOAD_MINECRAFT,
                     extractedCount * 100 / totalCount,
@@ -233,44 +335,52 @@ public class MinecraftDownloader {
         }
     }
 
-    private File downloadGameJson(JMinecraftVersionList.Version verInfo) throws IOException, MirrorTamperedException {
-        File targetFile = createGameJsonPath(verInfo.id);
+    private File downloadGameJson(@NonNull JMinecraftVersionList.Version version) throws IOException, MirrorTamperedException {
+        File targetFile = createGameJsonPath(version.id);
 
-        if (verInfo.sha1 == null && targetFile.canRead() && targetFile.isFile()) {
+        if (version.sha1 == null && targetFile.isFile() && targetFile.canRead()) {
             return targetFile;
         }
 
         FileUtils.ensureParentDirectory(targetFile);
         try {
-            DownloadUtils.ensureSha1(targetFile, AllSettings.getVerifyManifest().getValue() ? verInfo.sha1 : null, () -> {
-                ProgressLayout.setProgress(
-                        ProgressLayout.DOWNLOAD_MINECRAFT,
-                        0,
-                        R.string.newdl_downloading_metadata,
-                        targetFile.getName()
-                );
-                DownloadMirror.downloadFileMirrored(
-                        DownloadMirror.DOWNLOAD_CLASS_METADATA,
-                        verInfo.url,
-                        targetFile
-                );
-                return null;
-            });
+            DownloadUtils.ensureSha1(
+                    targetFile,
+                    AllSettings.getVerifyManifest().getValue() ? version.sha1 : null,
+                    () -> {
+                        ProgressLayout.setProgress(
+                                ProgressLayout.DOWNLOAD_MINECRAFT,
+                                0,
+                                R.string.newdl_downloading_metadata,
+                                targetFile.getName()
+                        );
+                        DownloadMirror.downloadFileMirrored(
+                                DownloadMirror.DOWNLOAD_CLASS_METADATA,
+                                version.url,
+                                targetFile
+                        );
+                        return null;
+                    }
+            );
         } catch (DownloadUtils.SHA1VerificationException e) {
-            if (DownloadMirror.isMirrored()) throw new MirrorTamperedException();
-            else throw e;
+            if (DownloadMirror.isMirrored()) {
+                throw new MirrorTamperedException();
+            }
+            throw e;
         }
 
         return targetFile;
     }
 
-    private JAssets downloadAssetsIndex(JMinecraftVersionList.Version verInfo) throws IOException {
-        JMinecraftVersionList.AssetIndex assetIndex = verInfo.assetIndex;
-        if (assetIndex == null || verInfo.assets == null) return null;
+    private JAssets downloadAssetsIndex(@NonNull JMinecraftVersionList.Version version) throws IOException {
+        JMinecraftVersionList.AssetIndex assetIndex = version.assetIndex;
+        if (assetIndex == null || version.assets == null) {
+            return null;
+        }
 
         File targetFile = new File(
                 ProfilePathHome.getAssetsHome(),
-                "indexes" + File.separator + verInfo.assets + ".json"
+                "indexes" + File.separator + version.assets + ".json"
         );
 
         FileUtils.ensureParentDirectory(targetFile);
@@ -292,126 +402,130 @@ public class MinecraftDownloader {
         return Tools.GLOBAL_GSON.fromJson(Tools.read(targetFile), JAssets.class);
     }
 
-    private MinecraftClientInfo getClientInfo(JMinecraftVersionList.Version verInfo) {
-        Map<String, MinecraftClientInfo> downloads = verInfo.downloads;
-        if (downloads == null) return null;
+    private MinecraftClientInfo getClientInfo(@NonNull JMinecraftVersionList.Version version) {
+        Map<String, MinecraftClientInfo> downloads = version.downloads;
+        if (downloads == null) {
+            return null;
+        }
         return downloads.get("client");
     }
 
-    private void downloadAndProcessMetadata(JMinecraftVersionList.Version verInfo, String versionName)
-            throws IOException, MirrorTamperedException {
-        File versionJsonFile;
-
-        if (verInfo != null) {
-            versionJsonFile = downloadGameJson(verInfo);
-        } else {
-            versionJsonFile = createGameJsonPath(versionName);
+    private void scheduleAssetDownloads(@NonNull PlanBuilder builder, @NonNull JAssets assets) throws IOException {
+        Map<String, JAssetInfo> assetObjects = assets.objects;
+        if (assetObjects == null || assetObjects.isEmpty()) {
+            return;
         }
 
-        if (versionJsonFile.canRead()) {
-            verInfo = Tools.GLOBAL_GSON.fromJson(Tools.read(versionJsonFile), JMinecraftVersionList.Version.class);
-        } else {
-            throw new IOException("Unable to read Version JSON for version " + versionName);
-        }
-
-        JAssets assets = downloadAssetsIndex(verInfo);
-        if (assets != null) {
-            scheduleAssetDownloads(assets);
-        }
-
-        MinecraftClientInfo minecraftClientInfo = getClientInfo(verInfo);
-        if (minecraftClientInfo != null) {
-            scheduleGameJarDownload(minecraftClientInfo, versionName);
-        }
-
-        if (verInfo.libraries != null) {
-            scheduleLibraryDownloads(verInfo.libraries);
-        }
-
-        if (Tools.isValidString(verInfo.inheritsFrom)) {
-            JMinecraftVersionList.Version inheritedVersion =
-                    AsyncMinecraftDownloader.getListedVersion(verInfo.inheritsFrom);
-            downloadAndProcessMetadata(inheritedVersion, verInfo.inheritsFrom);
-        }
-    }
-
-    private void growDownloadList(int addedElementCount) {
-        mScheduledDownloadTasks.ensureCapacity(mScheduledDownloadTasks.size() + addedElementCount);
-    }
-
-    private void scheduleDownload(
-            File targetFile,
-            int downloadClass,
-            String url,
-            String sha1,
-            long size,
-            boolean skipIfFailed
-    ) throws IOException {
-        FileUtils.ensureParentDirectory(targetFile);
-
-        mTotalFileCount++;
-
-        if (size <= 0 && !mUseFileCounter) {
-            try {
-                size = DownloadMirror.getContentLengthMirrored(downloadClass, url);
-            } catch (Exception e) {
-                size = -1;
+        for (Map.Entry<String, JAssetInfo> entry : assetObjects.entrySet()) {
+            String assetName = entry.getKey();
+            JAssetInfo assetInfo = entry.getValue();
+            if (assetInfo == null || assetInfo.hash == null || assetInfo.hash.length() < 2) {
+                continue;
             }
-        }
 
-        if (size < 0) {
-            size = 0;
-            mUseFileCounter = true;
-            Logging.i(
-                    "MinecraftDownloader",
-                    "Failed to determine size of " + targetFile.getName() + ", switching to file counter"
+            String hashedPath = assetInfo.hash.substring(0, 2) + File.separator + assetInfo.hash;
+            String basePath = assets.mapToResources
+                    ? ProfilePathHome.getResourcesHome()
+                    : ProfilePathHome.getAssetsHome();
+
+            File targetFile;
+            if (assets.virtual || assets.mapToResources) {
+                targetFile = new File(basePath, assetName);
+            } else {
+                targetFile = new File(basePath, "objects" + File.separator + hashedPath);
+            }
+
+            String sha1 = AllSettings.getCheckLibraries().getValue() ? assetInfo.hash : null;
+            builder.addDownload(
+                    new DownloadEntry(
+                            targetFile,
+                            DownloadMirror.DOWNLOAD_CLASS_ASSETS,
+                            MINECRAFT_RES + hashedPath,
+                            sha1,
+                            assetInfo.size,
+                            false
+                    )
             );
-        } else {
-            mTotalSize += size;
+        }
+    }
+
+    private void scheduleGameJarDownload(
+            @NonNull PlanBuilder builder,
+            @NonNull MinecraftClientInfo clientInfo,
+            @NonNull String versionName
+    ) throws IOException {
+        File clientJar = createGameJarPath(versionName);
+        String clientSha1 = AllSettings.getCheckLibraries().getValue() ? clientInfo.sha1 : null;
+
+        builder.addDownload(
+                new DownloadEntry(
+                        clientJar,
+                        DownloadMirror.DOWNLOAD_CLASS_LIBRARIES,
+                        clientInfo.url,
+                        clientSha1,
+                        clientInfo.size,
+                        false
+                )
+        );
+
+        // The last scheduled client JAR in the inheritance chain becomes the source JAR.
+        builder.sourceJarFile = clientJar;
+    }
+
+    private void scheduleNativeLibraryDownload(
+            @NonNull PlanBuilder builder,
+            @NonNull String baseRepository,
+            @NonNull DependentLibrary dependentLibrary
+    ) throws IOException {
+        String libArtifactPath = Tools.artifactToPath(dependentLibrary);
+        if (libArtifactPath == null) {
+            return;
         }
 
-        mScheduledDownloadTasks.add(
-                new DownloaderTask(targetFile, downloadClass, url, sha1, size, skipIfFailed)
+        String aarPath = org.apache.commons.io.FilenameUtils.removeExtension(libArtifactPath) + ".aar";
+        String downloadUrl = baseRepository + aarPath;
+        File targetFile = new File(ProfilePathHome.getLibrariesHome(), aarPath);
+
+        builder.addNative(targetFile);
+        builder.addDownload(
+                new DownloadEntry(
+                        targetFile,
+                        DownloadMirror.DOWNLOAD_CLASS_LIBRARIES,
+                        downloadUrl,
+                        null,
+                        0L,
+                        true
+                )
         );
     }
 
-    private void scheduleNativeLibraryDownload(String baseRepository, DependentLibrary dependentLibrary)
-            throws IOException {
-        String libArtifactPath = Tools.artifactToPath(dependentLibrary);
-        if (libArtifactPath == null) return;
-
-        String path = FileUtils.removeExtension(libArtifactPath) + ".aar";
-        String downloadUrl = baseRepository + path;
-        File targetPath = new File(ProfilePathHome.getLibrariesHome(), path);
-
-        mDeclaredNatives.add(targetPath);
-        scheduleDownload(
-                targetPath,
-                DownloadMirror.DOWNLOAD_CLASS_LIBRARIES,
-                downloadUrl,
-                null,
-                0,
-                true
-        );
-    }
-
-    private void scheduleLibraryDownloads(DependentLibrary[] dependentLibraries) throws IOException {
+    private void scheduleLibraryDownloads(
+            @NonNull PlanBuilder builder,
+            @NonNull DependentLibrary[] dependentLibraries
+    ) throws IOException {
         Tools.preProcessLibraries(dependentLibraries);
-        growDownloadList(dependentLibraries.length);
 
         for (DependentLibrary dependentLibrary : dependentLibraries) {
-            if (dependentLibrary.name.startsWith("org.lwjgl")) continue;
+            if (dependentLibrary == null || dependentLibrary.name == null) {
+                continue;
+            }
+
+            if (dependentLibrary.name.startsWith("org.lwjgl")) {
+                continue;
+            }
 
             if (dependentLibrary.name.startsWith("net.java.dev.jna:jna:")) {
-                scheduleNativeLibraryDownload(MAVEN_CENTRAL_REPO1, dependentLibrary);
+                scheduleNativeLibraryDownload(builder, MAVEN_CENTRAL_REPO1, dependentLibrary);
             }
 
             String libArtifactPath = Tools.artifactToPath(dependentLibrary);
-            if (libArtifactPath == null) continue;
+            if (libArtifactPath == null) {
+                continue;
+            }
 
             String sha1 = null;
             String url = null;
-            long size = 0;
+            long size = 0L;
             boolean skipIfFailed = false;
 
             if (dependentLibrary.downloads != null) {
@@ -422,7 +536,7 @@ public class MinecraftDownloader {
                     size = artifact.size;
                 } else {
                     Logging.i(
-                            "NewMCDownloader",
+                            "MinecraftDownloader",
                             "Skipped library " + dependentLibrary.name + " due to lack of artifact"
                     );
                     continue;
@@ -432,7 +546,8 @@ public class MinecraftDownloader {
             if (url == null) {
                 url = (dependentLibrary.url == null
                         ? "https://libraries.minecraft.net/"
-                        : dependentLibrary.url.replace("http://", "https://")) + libArtifactPath;
+                        : dependentLibrary.url.replace("http://", "https://"))
+                        + libArtifactPath;
                 skipIfFailed = true;
             }
 
@@ -440,205 +555,291 @@ public class MinecraftDownloader {
                 sha1 = null;
             }
 
-            scheduleDownload(
-                    new File(ProfilePathHome.getLibrariesHome(), libArtifactPath),
-                    DownloadMirror.DOWNLOAD_CLASS_LIBRARIES,
-                    url,
-                    sha1,
-                    size,
-                    skipIfFailed
+            builder.addDownload(
+                    new DownloadEntry(
+                            new File(ProfilePathHome.getLibrariesHome(), libArtifactPath),
+                            DownloadMirror.DOWNLOAD_CLASS_LIBRARIES,
+                            url,
+                            sha1,
+                            size,
+                            skipIfFailed
+                    )
             );
         }
-    }
-
-    private void scheduleAssetDownloads(JAssets assets) throws IOException {
-        Map<String, JAssetInfo> assetObjects = assets.objects;
-        if (assetObjects == null) return;
-
-        Set<String> assetNames = assetObjects.keySet();
-        growDownloadList(assetNames.size());
-
-        for (String asset : assetNames) {
-            JAssetInfo assetInfo = assetObjects.get(asset);
-            if (assetInfo == null) continue;
-
-            File targetFile;
-            String hashedPath = assetInfo.hash.substring(0, 2) + File.separator + assetInfo.hash;
-            String basePath = assets.mapToResources
-                    ? ProfilePathHome.getResourcesHome()
-                    : ProfilePathHome.getAssetsHome();
-
-            if (assets.virtual || assets.mapToResources) {
-                targetFile = new File(basePath, asset);
-            } else {
-                targetFile = new File(basePath, "objects" + File.separator + hashedPath);
-            }
-
-            String sha1 = AllSettings.getCheckLibraries().getValue() ? assetInfo.hash : null;
-            scheduleDownload(
-                    targetFile,
-                    DownloadMirror.DOWNLOAD_CLASS_ASSETS,
-                    MINECRAFT_RES + hashedPath,
-                    sha1,
-                    assetInfo.size,
-                    false
-            );
-        }
-    }
-
-    private void scheduleGameJarDownload(MinecraftClientInfo minecraftClientInfo, String versionName)
-            throws IOException {
-        File clientJar = createGameJarPath(versionName);
-        String clientSha1 = AllSettings.getCheckLibraries().getValue()
-                ? minecraftClientInfo.sha1
-                : null;
-
-        growDownloadList(1);
-        scheduleDownload(
-                clientJar,
-                DownloadMirror.DOWNLOAD_CLASS_LIBRARIES,
-                minecraftClientInfo.url,
-                clientSha1,
-                minecraftClientInfo.size,
-                false
-        );
-
-        mSourceJarFile = clientJar;
     }
 
     private static byte[] getLocalBuffer() {
-        byte[] tlb = sThreadLocalDownloadBuffer.get();
-        if (tlb != null) return tlb;
+        byte[] buffer = THREAD_LOCAL_DOWNLOAD_BUFFER.get();
+        if (buffer != null) {
+            return buffer;
+        }
 
-        tlb = new byte[32768];
-        sThreadLocalDownloadBuffer.set(tlb);
-        return tlb;
+        buffer = new byte[32768];
+        THREAD_LOCAL_DOWNLOAD_BUFFER.set(buffer);
+        return buffer;
     }
 
-    private final class DownloaderTask implements Runnable, Tools.DownloaderFeedback {
-        private final File mTargetPath;
-        private final String mTargetUrl;
-        private String mTargetSha1;
-        private final int mDownloadClass;
-        private final boolean mSkipIfFailed;
-        private long mLastCurr;
-        private final long mDownloadSize;
+    private static final class DownloadPlan {
+        final List<DownloadEntry> entries;
+        final List<File> declaredNatives;
+        final File sourceJarFile;
+        final File targetJarFile;
+        final long totalFileCount;
+        final long totalSize;
+        final boolean useFileCounter;
 
-        DownloaderTask(
-                File targetPath,
+        private DownloadPlan(
+                List<DownloadEntry> entries,
+                List<File> declaredNatives,
+                File sourceJarFile,
+                File targetJarFile,
+                long totalFileCount,
+                long totalSize,
+                boolean useFileCounter
+        ) {
+            this.entries = entries;
+            this.declaredNatives = declaredNatives;
+            this.sourceJarFile = sourceJarFile;
+            this.targetJarFile = targetJarFile;
+            this.totalFileCount = totalFileCount;
+            this.totalSize = totalSize;
+            this.useFileCounter = useFileCounter;
+        }
+    }
+
+    private static final class DownloadEntry {
+        final File targetFile;
+        final int downloadClass;
+        final String url;
+        final String sha1;
+        final long size;
+        final boolean skipIfFailed;
+
+        private DownloadEntry(
+                File targetFile,
                 int downloadClass,
-                String targetUrl,
-                String targetSha1,
-                long downloadSize,
+                String url,
+                String sha1,
+                long size,
                 boolean skipIfFailed
         ) {
-            this.mTargetPath = targetPath;
-            this.mTargetUrl = targetUrl;
-            this.mTargetSha1 = targetSha1;
-            this.mDownloadClass = downloadClass;
-            this.mDownloadSize = downloadSize;
-            this.mSkipIfFailed = skipIfFailed;
+            this.targetFile = targetFile;
+            this.downloadClass = downloadClass;
+            this.url = url;
+            this.sha1 = sha1;
+            this.size = Math.max(0L, size);
+            this.skipIfFailed = skipIfFailed;
+        }
+    }
+
+    private static final class DownloadStats {
+        final AtomicLong processedFileCounter = new AtomicLong(0);
+        final AtomicLong processedSizeCounter = new AtomicLong(0);
+        final AtomicLong internetUsageCounter = new AtomicLong(0);
+        final long totalFileCount;
+        final long totalSize;
+        final boolean useFileCounter;
+
+        private DownloadStats(long totalFileCount, long totalSize, boolean useFileCounter) {
+            this.totalFileCount = totalFileCount;
+            this.totalSize = totalSize;
+            this.useFileCounter = useFileCounter;
+        }
+    }
+
+    private static final class PlanBuilder {
+        private final List<DownloadEntry> entries = new ArrayList<>();
+        private final List<File> declaredNatives = new ArrayList<>();
+        private final Set<String> scheduledPaths = new HashSet<>();
+        private final Set<String> nativePaths = new HashSet<>();
+        private final File targetJarFile;
+
+        private long totalFileCount = 0L;
+        private long totalSize = 0L;
+        private boolean useFileCounter = false;
+        private File sourceJarFile;
+
+        private PlanBuilder(@NonNull File targetJarFile) {
+            this.targetJarFile = targetJarFile;
         }
 
-        private String downloadSha1() throws IOException {
-            String downloadedHash = DownloadMirror.downloadStringMirrored(
-                    mDownloadClass,
-                    mTargetUrl + ".sha1"
+        private void addDownload(@NonNull DownloadEntry entry) throws IOException {
+            FileUtils.ensureParentDirectory(entry.targetFile);
+
+            String pathKey = entry.targetFile.getCanonicalPath();
+            if (!scheduledPaths.add(pathKey)) {
+                return;
+            }
+
+            entries.add(entry);
+            totalFileCount++;
+
+            if (entry.size > 0) {
+                totalSize += entry.size;
+            } else {
+                useFileCounter = true;
+            }
+        }
+
+        private void addNative(@NonNull File file) throws IOException {
+            String pathKey = file.getCanonicalPath();
+            if (nativePaths.add(pathKey)) {
+                declaredNatives.add(file);
+            }
+        }
+
+        private DownloadPlan build() {
+            return new DownloadPlan(
+                    entries,
+                    declaredNatives,
+                    sourceJarFile,
+                    targetJarFile,
+                    totalFileCount,
+                    totalSize,
+                    useFileCounter
             );
-
-            if (!Tools.isValidString(downloadedHash)) return null;
-
-            downloadedHash = downloadedHash.trim();
-            if (downloadedHash.length() != 40) return null;
-
-            return downloadedHash;
         }
+    }
 
-        private void tryGetLibrarySha1() {
-            String resultHash = null;
-            try {
-                resultHash = downloadSha1();
-                mInternetUsageCounter.getAndAdd(40);
-            } catch (IOException e) {
-                Logging.i("MinecraftDownloader", "Failed to download hash", e);
-            }
+    private static final class NamedThreadFactory implements ThreadFactory {
+        private final String prefix;
+        private int counter = 0;
 
-            if (resultHash != null) {
-                Logging.i(
-                        "MinecraftDownloader",
-                        "Got hash: " + resultHash + " for " + FileUtils.getFileName(mTargetUrl)
-                );
-                mTargetSha1 = resultHash;
-            }
+        private NamedThreadFactory(String prefix) {
+            this.prefix = prefix;
         }
 
         @Override
-        public void run() {
+        public synchronized Thread newThread(@NonNull Runnable r) {
+            Thread thread = new Thread(r, prefix + "-" + counter++);
+            thread.setDaemon(true);
+            return thread;
+        }
+    }
+
+    private static final class DownloaderTask implements Callable<Void>, Tools.DownloaderFeedback {
+        private final DownloadEntry entry;
+        private final DownloadStats stats;
+        private final ConcurrentLinkedQueue<Throwable> failures;
+        private long lastCurr = 0L;
+
+        private DownloaderTask(
+                @NonNull DownloadEntry entry,
+                @NonNull DownloadStats stats,
+                @NonNull ConcurrentLinkedQueue<Throwable> failures
+        ) {
+            this.entry = entry;
+            this.stats = stats;
+            this.failures = failures;
+        }
+
+        @Override
+        public Void call() throws Exception {
             try {
-                runCatching();
-            } catch (Exception e) {
-                mDownloaderThreadException.set(e);
+                runInternal();
+                return null;
+            } catch (Throwable t) {
+                failures.add(t);
+                throw t;
             }
         }
 
-        private void runCatching() throws Exception {
-            if (mDownloadClass == DownloadMirror.DOWNLOAD_CLASS_LIBRARIES &&
-                    !Tools.isValidString(mTargetSha1)) {
-                tryGetLibrarySha1();
+        private void runInternal() throws Exception {
+            if (Thread.currentThread().isInterrupted()) {
+                throw new InterruptedException("Download interrupted before start");
             }
 
-            if (Tools.isValidString(mTargetSha1)) {
-                verifyFileSha1();
-            } else {
-                mTargetSha1 = null;
-                if (mTargetPath.exists()) {
+            String effectiveSha1 = entry.sha1;
+
+            // Optimization:
+            // Only try to fetch a remote .sha1 sidecar when it can help us skip downloading an already existing file.
+            if (entry.downloadClass == DownloadMirror.DOWNLOAD_CLASS_LIBRARIES
+                    && !Tools.isValidString(effectiveSha1)
+                    && entry.targetFile.isFile()
+                    && entry.targetFile.canRead()) {
+                effectiveSha1 = tryDownloadRemoteSha1(entry.downloadClass, entry.url, stats);
+            }
+
+            if (Tools.isValidString(effectiveSha1)) {
+                if (entry.targetFile.isFile()
+                        && entry.targetFile.canRead()
+                        && Tools.compareSHA1(entry.targetFile, effectiveSha1)) {
                     finishWithoutDownloading();
-                } else {
-                    downloadFile();
+                    return;
                 }
-            }
-        }
-
-        private void verifyFileSha1() throws Exception {
-            if (mTargetPath.isFile() &&
-                    mTargetPath.canRead() &&
-                    Tools.compareSHA1(mTargetPath, mTargetSha1)) {
+            } else if (entry.targetFile.exists()) {
                 finishWithoutDownloading();
-            } else {
-                downloadFile();
+                return;
+            }
+
+            downloadFile(effectiveSha1);
+        }
+
+        private String tryDownloadRemoteSha1(int downloadClass, String targetUrl, DownloadStats stats) {
+            try {
+                String hash = DownloadMirror.downloadStringMirrored(downloadClass, targetUrl + ".sha1");
+                if (!Tools.isValidString(hash)) {
+                    return null;
+                }
+
+                hash = hash.trim();
+                if (hash.length() != 40) {
+                    return null;
+                }
+
+                stats.internetUsageCounter.addAndGet(hash.length());
+                Logging.i("MinecraftDownloader", "Got remote SHA1 for " + targetUrl);
+                return hash;
+            } catch (IOException e) {
+                Logging.i("MinecraftDownloader", "Failed to download remote SHA1 for " + targetUrl, e);
+                return null;
             }
         }
 
-        private void downloadFile() throws Exception {
+        private void downloadFile(@Nullable String effectiveSha1) throws Exception {
             try {
-                DownloadUtils.ensureSha1(mTargetPath, mTargetSha1, () -> {
+                DownloadUtils.ensureSha1(entry.targetFile, effectiveSha1, () -> {
                     DownloadMirror.downloadFileMirrored(
-                            mDownloadClass,
-                            mTargetUrl,
-                            mTargetPath,
+                            entry.downloadClass,
+                            entry.url,
+                            entry.targetFile,
                             getLocalBuffer(),
                             this
                     );
                     return null;
                 });
             } catch (Exception e) {
-                if (!mSkipIfFailed) throw e;
+                if (!entry.skipIfFailed) {
+                    throw e;
+                }
+                Logging.i("MinecraftDownloader", "Skipping failed optional download: " + entry.url, e);
             }
 
-            mProcessedFileCounter.incrementAndGet();
+            stats.processedFileCounter.incrementAndGet();
+            if (entry.size > 0 && lastCurr <= 0) {
+                // Fallback: in case the downloader did not report progress callbacks,
+                // still count known-size completed files as processed.
+                stats.processedSizeCounter.addAndGet(entry.size);
+            }
         }
 
         private void finishWithoutDownloading() {
-            mProcessedFileCounter.incrementAndGet();
-            mProcessedSizeCounter.addAndGet(mDownloadSize);
+            stats.processedFileCounter.incrementAndGet();
+            if (entry.size > 0) {
+                stats.processedSizeCounter.addAndGet(entry.size);
+            }
         }
 
         @Override
         public void updateProgress(long curr, long max) {
-            long delta = curr - mLastCurr;
-            mProcessedSizeCounter.addAndGet(delta);
-            mInternetUsageCounter.addAndGet(delta);
-            mLastCurr = curr;
+            long delta = curr - lastCurr;
+            if (delta <= 0) {
+                return;
+            }
+
+            stats.processedSizeCounter.addAndGet(delta);
+            stats.internetUsageCounter.addAndGet(delta);
+            lastCurr = curr;
         }
     }
 }

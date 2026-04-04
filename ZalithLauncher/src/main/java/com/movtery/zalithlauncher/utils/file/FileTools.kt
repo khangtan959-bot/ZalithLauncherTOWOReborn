@@ -27,14 +27,10 @@ class FileTools {
         const val INVALID_CHARACTERS_REGEX = "[\\\\/:*?\"<>|\\t\\n]"
 
         @JvmStatic
-        fun mkdir(dir: File): Boolean {
-            return dir.mkdir()
-        }
+        fun mkdir(dir: File): Boolean = dir.mkdir()
 
         @JvmStatic
-        fun mkdirs(dir: File): Boolean {
-            return dir.mkdirs()
-        }
+        fun mkdirs(dir: File): Boolean = dir.mkdirs()
 
         @JvmStatic
         fun copyFileInBackground(context: Context, fileUri: Uri, rootPath: String): File {
@@ -52,39 +48,44 @@ class FileTools {
         }
 
         @JvmStatic
-        fun ensureValidFilename(str: String): String =
-            str.trim().replace(INVALID_CHARACTERS_REGEX.toRegex(), "-").run {
-                if (length > 255) substring(0, 255)
-                else this
-            }
+        fun ensureValidFilename(name: String): String {
+            return name.trim()
+                .replace(INVALID_CHARACTERS_REGEX.toRegex(), "-")
+                .let {
+                    if (it.length > 255) it.substring(0, 255) else it
+                }
+        }
 
         @Throws(InvalidFilenameException::class)
         @JvmStatic
-        fun checkFilenameValidity(str: String) {
-            val illegalCharsRegex = INVALID_CHARACTERS_REGEX.toRegex()
+        fun checkFilenameValidity(name: String) {
+            val illegalCharactersRegex = INVALID_CHARACTERS_REGEX.toRegex()
 
-            val illegalChars = illegalCharsRegex.findAll(str)
+            val illegalCharacters = illegalCharactersRegex.findAll(name)
                 .map { it.value }
                 .distinct()
                 .joinToString("")
 
-            if (illegalChars.isNotEmpty()) {
-                throw InvalidFilenameException("The filename contains illegal characters", illegalChars)
+            if (illegalCharacters.isNotEmpty()) {
+                throw InvalidFilenameException(
+                    "The filename contains illegal characters",
+                    illegalCharacters
+                )
             }
 
-            if (str.length > 255) {
-                throw InvalidFilenameException("Invalid filename length", str.length)
+            if (name.length > 255) {
+                throw InvalidFilenameException("Invalid filename length", name.length)
             }
         }
 
         @JvmStatic
         fun isFilenameInvalid(
-            str: String,
+            name: String,
             containsIllegalCharacters: (illegalCharacters: String) -> Unit,
             isInvalidLength: (invalidLength: Int) -> Unit
         ): Boolean {
             try {
-                checkFilenameValidity(str)
+                checkFilenameValidity(name)
             } catch (e: InvalidFilenameException) {
                 if (e.containsIllegalCharacters()) {
                     containsIllegalCharacters(e.illegalCharacters)
@@ -99,14 +100,21 @@ class FileTools {
 
         @JvmStatic
         fun isFilenameInvalid(editText: EditText): Boolean {
-            val str = editText.text.toString()
+            val text = editText.text.toString()
             return isFilenameInvalid(
-                str,
+                text,
                 { illegalCharacters ->
-                    editText.error = editText.context.getString(R.string.generic_input_invalid_character, illegalCharacters)
+                    editText.error = editText.context.getString(
+                        R.string.generic_input_invalid_character,
+                        illegalCharacters
+                    )
                 },
                 { invalidLength ->
-                    editText.error = editText.context.getString(R.string.file_invalid_length, invalidLength, 255)
+                    editText.error = editText.context.getString(
+                        R.string.file_invalid_length,
+                        invalidLength,
+                        255
+                    )
                 }
             )
         }
@@ -123,28 +131,27 @@ class FileTools {
                 return null
             }
 
-            val files = folder.listFiles(FilenameFilter { _: File?, name: String ->
-                !name.startsWith(
-                    "."
-                )
-            })
-            if (files == null || files.isEmpty()) {
+            val files = folder.listFiles(FilenameFilter { _, name ->
+                !name.startsWith(".")
+            }) ?: return null
+
+            if (files.isEmpty()) {
                 return null
             }
 
-            val fileList: List<File> = listOf(*files)
-            fileList.sortedWith(Comparator.comparingLong { obj: File -> obj.lastModified() }
-                .reversed())
+            val latestFile = files.maxByOrNull { it.lastModified() } ?: return null
 
             if (modifyTime > 0) {
-                val difference =
-                    (ZHTools.getCurrentTimeMillis() - fileList[0].lastModified()) / 1000 //转换为秒
-                if (difference >= modifyTime) {
+                val differenceSeconds =
+                    (ZHTools.getCurrentTimeMillis() - latestFile.lastModified()) / 1000
+
+                // Convert to seconds.
+                if (differenceSeconds >= modifyTime) {
                     return null
                 }
             }
 
-            return fileList[0]
+            return latestFile
         }
 
         @JvmStatic
@@ -159,21 +166,22 @@ class FileTools {
                 filePath
             )
 
-            val shareIntent = Intent(Intent.ACTION_SEND)
-            shareIntent.putExtra(Intent.EXTRA_STREAM, contentUri)
-            shareIntent.addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
-            shareIntent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            shareIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            shareIntent.setDataAndType(contentUri, "*/*")
+            val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                putExtra(Intent.EXTRA_STREAM, contentUri)
+                addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                setDataAndType(contentUri, "*/*")
+            }
 
-            val sendIntent = Intent.createChooser(shareIntent, fileName)
-            context.startActivity(sendIntent)
+            val chooserIntent = Intent.createChooser(shareIntent, fileName)
+            context.startActivity(chooserIntent)
         }
 
         @JvmStatic
         @SuppressLint("UseCompatLoadingForDrawables")
         fun renameFileListener(context: Context, endTask: Task<*>?, file: File, suffix: String) {
-            val fileParent = file.parent
+            val parentPath = file.parent
             val fileName = file.name
 
             EditTextDialog.Builder(context)
@@ -191,7 +199,7 @@ class FileTools {
                         return@ConfirmListener true
                     }
 
-                    val newFile = File(fileParent, newName + suffix)
+                    val newFile = File(parentPath, newName + suffix)
                     if (newFile.exists()) {
                         editBox.error = context.getString(R.string.file_rename_exitis)
                         return@ConfirmListener false
@@ -202,13 +210,14 @@ class FileTools {
                         endTask?.execute()
                     }
                     true
-                }).showDialog()
+                })
+                .showDialog()
         }
 
         @JvmStatic
         @SuppressLint("UseCompatLoadingForDrawables")
         fun renameFileListener(context: Context, endTask: Task<*>?, file: File) {
-            val fileParent = file.parent
+            val parentPath = file.parent
             val fileName = file.name
 
             EditTextDialog.Builder(context)
@@ -226,7 +235,7 @@ class FileTools {
                         return@ConfirmListener true
                     }
 
-                    val newFile = File(fileParent, newName)
+                    val newFile = File(parentPath, newName)
                     if (newFile.exists()) {
                         editBox.error = context.getString(R.string.file_rename_exitis)
                         return@ConfirmListener false
@@ -237,24 +246,27 @@ class FileTools {
                         endTask?.execute()
                     }
                     true
-                }).showDialog()
+                })
+                .showDialog()
         }
 
         @JvmStatic
-        fun renameFile(origin: File, target: File): Boolean {
-            return origin.renameTo(target)
+        fun renameFile(origin: File, target: File): Boolean = origin.renameTo(target)
+
+        @JvmStatic
+        fun copyFile(file: File, target: File) {
+            when {
+                file.isFile -> FileUtils.copyFile(file, target)
+                file.isDirectory -> FileUtils.copyDirectory(file, target)
+            }
         }
 
         @JvmStatic
-        fun copyFile(file :File, target: File) {
-            if (file.isFile) FileUtils.copyFile(file, target)
-            else if (file.isDirectory) FileUtils.copyDirectory(file, target)
-        }
-
-        @JvmStatic
-        fun moveFile(file :File, target: File) {
-            if (file.isFile) FileUtils.moveFile(file, target)
-            else if (file.isDirectory) FileUtils.moveDirectory(file, target)
+        fun moveFile(file: File, target: File) {
+            when {
+                file.isFile -> FileUtils.moveFile(file, target)
+                file.isDirectory -> FileUtils.moveDirectory(file, target)
+            }
         }
 
         @JvmStatic
@@ -264,6 +276,7 @@ class FileTools {
             } else {
                 fileName.lastIndexOf(fileExtension)
             }
+
             return if (dotIndex == -1) fileName else fileName.substring(0, dotIndex)
         }
 
@@ -278,18 +291,26 @@ class FileTools {
             val units = arrayOf("B", "KB", "MB", "GB")
             var unitIndex = 0
             var value = bytes.toDouble()
-            //循环获取合适的单位
+
+            // Keep dividing until an appropriate unit is found.
             while (value >= 1024 && unitIndex < units.size - 1) {
                 value /= 1024.0
                 unitIndex++
             }
+
             return String.format("%.2f %s", value, units[unitIndex])
         }
 
         @JvmStatic
         @Throws(IOException::class)
-        fun zipDirectory(folder: File, parentPath: String, filter: (File) -> Boolean, zos: ZipOutputStream) {
+        fun zipDirectory(
+            folder: File,
+            parentPath: String,
+            filter: (File) -> Boolean,
+            zos: ZipOutputStream
+        ) {
             val files = folder.listFiles()?.filter(filter) ?: return
+
             for (file in files) {
                 if (file.isDirectory) {
                     zipDirectory(file, parentPath + file.name + "/", filter, zos)
@@ -304,14 +325,15 @@ class FileTools {
         fun zipFile(file: File, entryName: String, zos: ZipOutputStream) {
             FileInputStream(file).use { fis ->
                 val zipEntry = ZipEntry(entryName)
-                zipEntry.time = file.lastModified() //保留文件的修改时间
+                zipEntry.time = file.lastModified() // Preserve the file's modified time.
                 zos.putNextEntry(zipEntry)
 
                 val buffer = ByteArray(4096)
                 var length: Int
-                while ((fis.read(buffer).also { length = it }) >= 0) {
+                while (fis.read(buffer).also { length = it } >= 0) {
                     zos.write(buffer, 0, length)
                 }
+
                 zos.closeEntry()
             }
         }
@@ -326,18 +348,21 @@ class FileTools {
         @Throws(Exception::class)
         fun calculateFileHash(inputStream: InputStream, algorithm: String = "SHA-256"): String {
             val digest = MessageDigest.getInstance(algorithm)
+
             inputStream.use { input ->
                 val buffer = ByteArray(8192)
                 var bytesRead: Int
+
                 while (input.read(buffer).also { bytesRead = it } != -1) {
                     digest.update(buffer, 0, bytesRead)
                 }
             }
+
             return digest.digest().toHex()
         }
 
         /**
-         * 字节数组转十六进制字符串（高效实现）
+         * Convert a byte array to a hexadecimal string.
          */
         private fun ByteArray.toHex(): String {
             val hexChars = "0123456789abcdef"

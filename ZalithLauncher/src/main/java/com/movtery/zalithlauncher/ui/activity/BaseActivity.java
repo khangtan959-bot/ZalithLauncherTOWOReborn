@@ -34,11 +34,12 @@ public abstract class BaseActivity extends AppCompatActivity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+
         LocaleHelper.Companion.setLocale(this);
         Tools.setFullscreen(this);
         Tools.updateWindowSize(this);
 
-        checkStoragePermissions();
+        refreshStoragePermissions();
 
         // Load built-in renderers.
         Renderers.INSTANCE.init(false);
@@ -46,13 +47,14 @@ public abstract class BaseActivity extends AppCompatActivity {
         // Load plugins.
         PluginLoader.loadAllPlugins(this, false);
 
-        // Refresh the game path.
+        // Refresh the game path list.
         ProfilePathManager.INSTANCE.refreshPath();
     }
 
     @Override
     protected void onResume() {
         super.onResume();
+
         ContextExecutor.setActivity(this);
 
         if (!Tools.checkStorageRoot()) {
@@ -61,14 +63,14 @@ public abstract class BaseActivity extends AppCompatActivity {
             return;
         }
 
-        checkStoragePermissions();
+        refreshStoragePermissions();
 
         // Force-refresh renderers and plugins in case the user installed
         // a new renderer plugin while the app was in the background.
         Renderers.INSTANCE.init(true);
         PluginLoader.loadAllPlugins(this, true);
 
-        // Refresh the game path again in case external state changed.
+        // Refresh the game path list again in case external state changed.
         ProfilePathManager.INSTANCE.refreshPath();
 
         AccountsManager.INSTANCE.reload();
@@ -104,13 +106,14 @@ public abstract class BaseActivity extends AppCompatActivity {
         Tools.ignoreNotch(shouldIgnoreNotch(), this);
     }
 
-    /** @return Whether the notch should be ignored. */
+    /**
+     * @return whether the notch should be ignored
+     */
     public boolean shouldIgnoreNotch() {
         return AllSettings.getIgnoreNotchLauncher().getValue();
     }
 
-    private void checkStoragePermissions() {
-        // Check all file-management permissions.
-        StoragePermissionsUtils.checkPermissions(this);
+    private void refreshStoragePermissions() {
+        StoragePermissionsUtils.refreshPermissions(this);
     }
 }

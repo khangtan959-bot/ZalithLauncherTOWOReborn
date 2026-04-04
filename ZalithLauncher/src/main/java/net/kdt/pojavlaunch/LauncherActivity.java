@@ -7,9 +7,9 @@ import android.Manifest;
 import android.app.NotificationManager;
 import android.content.Context;
 import android.content.Intent;
-import android.net.Uri;
 import android.content.res.ColorStateList;
 import android.graphics.Bitmap;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.view.View;
@@ -114,29 +114,37 @@ import java.util.concurrent.Future;
 
 public class LauncherActivity extends BaseActivity {
 
-    private final AnimPlayer noticeAnimPlayer = new AnimPlayer();
-    private ActivityLauncherBinding binding;
-    private SettingsButtonWrapper mSettingsButtonWrapper;
-    private ProgressServiceKeeper mProgressServiceKeeper;
-    private NotificationManager mNotificationManager;
-    private Future<?> checkNotice;
+    private static final String TAG = "LauncherActivity";
+    private static final String FALLBACK_COMPATIBLE_RENDERER_NAME = "a compatible renderer";
+    private static final String MOBILE_GLUES_URL =
+            "https://github.com/MobileGL-Dev/MobileGlues-release/releases";
 
-    private ActivityResultLauncher<String> mRequestNotificationPermissionLauncher;
-    private WeakReference<Runnable> mRequestNotificationPermissionRunnable;
+    private final AnimPlayer noticeAnimPlayer = new AnimPlayer();
+
+    private ActivityLauncherBinding binding;
+    private SettingsButtonWrapper settingsButtonWrapper;
+    private ProgressServiceKeeper progressServiceKeeper;
+    private NotificationManager notificationManager;
+    private Future<?> checkNoticeTask;
+
+    private ActivityResultLauncher<String> requestNotificationPermissionLauncher;
+    private WeakReference<Runnable> requestNotificationPermissionRunnable;
+
     public final ActivityResultLauncher<Object> modInstallerLauncher =
             registerForActivityResult(new OpenDocumentWithExtension("jar"), uris -> {
                 if (uris != null) {
                     Tools.launchModInstaller(this, uris.get(0));
                 }
             });
+
     private final FragmentManager.FragmentLifecycleCallbacks fragmentCallbackListener =
             new FragmentManager.FragmentLifecycleCallbacks() {
                 @Override
                 public void onFragmentResumed(@NonNull FragmentManager fm, @NonNull Fragment fragment) {
                     if (fragment instanceof MainMenuFragment) {
-                        mSettingsButtonWrapper.setButtonType(ButtonType.SETTINGS);
+                        settingsButtonWrapper.setButtonType(ButtonType.SETTINGS);
                     } else {
-                        mSettingsButtonWrapper.setButtonType(ButtonType.HOME);
+                        settingsButtonWrapper.setButtonType(ButtonType.HOME);
                     }
                 }
             };
@@ -144,7 +152,7 @@ public class LauncherActivity extends BaseActivity {
     private final TaskCountListener doubleLaunchPreventionListener = taskCount -> {
         if (taskCount > 0) {
             TaskExecutors.runInUIThread(() ->
-                    mNotificationManager.cancel(NotificationUtils.NOTIFICATION_ID_GAME_START));
+                    notificationManager.cancel(NotificationUtils.NOTIFICATION_ID_GAME_START));
         }
     };
 
@@ -166,6 +174,7 @@ public class LauncherActivity extends BaseActivity {
         if (currentFragment == null || getVisibleFragment(AccountFragment.TAG) != null) {
             return;
         }
+
         ZHTools.swapFragmentWithAnim(currentFragment, AccountFragment.class, AccountFragment.TAG, null);
     }
 
@@ -175,21 +184,24 @@ public class LauncherActivity extends BaseActivity {
             Toast.makeText(this, R.string.tasks_ongoing, Toast.LENGTH_LONG).show();
             return;
         }
+
         Version version = VersionsManager.INSTANCE.getCurrentVersion();
         if (version == null) {
             Toast.makeText(this, R.string.error_no_version, Toast.LENGTH_LONG).show();
             return;
         }
+
         if (AccountsManager.INSTANCE.getAllAccounts().isEmpty()) {
             Toast.makeText(this, R.string.account_no_saved_accounts, Toast.LENGTH_LONG).show();
             EventBus.getDefault().post(new SwapToLoginEvent());
             return;
         }
+
         RendererPlugin rendererPlugin =
                 RendererPluginManager.getConfigurablePluginOrNull(version.getRenderer());
 
         if (rendererPlugin != null) {
-            StoragePermissionsUtils.checkPermissions(
+            StoragePermissionsUtils.ensurePermissions(
                     this,
                     R.string.generic_warning,
                     getString(
@@ -197,20 +209,21 @@ public class LauncherActivity extends BaseActivity {
                             rendererPlugin.getDisplayName(),
                             InfoDistributor.APP_NAME
                     ),
-                    new StoragePermissionsUtils.PermissionGranted() {
+                    new StoragePermissionsUtils.PermissionResult() {
                         @Override
-                        public void granted() {
+                        public void onGranted() {
                             launchGame(version);
                         }
 
                         @Override
-                        public void cancelled() {
+                        public void onCancelled() {
                             launchGame(version);
                         }
                     }
             );
             return;
         }
+
         launchGame(version);
     }
 
@@ -402,13 +415,14 @@ public class LauncherActivity extends BaseActivity {
                     event.getBundle()
             );
         } catch (Exception e) {
-            Logging.e("LauncherActivity", "Failed to open a new fragment.", e);
+            Logging.e(TAG, "Failed to open a new fragment.", e);
         }
     }
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+
         binding = ActivityLauncherBinding.inflate(getLayoutInflater());
         setContentView(binding.getRoot());
 
@@ -417,8 +431,7 @@ public class LauncherActivity extends BaseActivity {
         setupNotificationPermissionLauncher();
         checkNotificationPermission();
 
-        mNotificationManager =
-                (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+        notificationManager = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
 
         registerProgressListeners();
         loadVersionList();
@@ -450,7 +463,7 @@ public class LauncherActivity extends BaseActivity {
 
         binding.progressLayout.cleanUpObservers();
         ProgressKeeper.removeTaskCountListener(binding.progressLayout);
-        ProgressKeeper.removeTaskCountListener(mProgressServiceKeeper);
+        ProgressKeeper.removeTaskCountListener(progressServiceKeeper);
 
         getSupportFragmentManager().unregisterFragmentLifecycleCallbacks(fragmentCallbackListener);
         ContextExecutor.clearActivity();
@@ -462,7 +475,7 @@ public class LauncherActivity extends BaseActivity {
     }
 
     private void setupNotificationPermissionLauncher() {
-        mRequestNotificationPermissionLauncher = registerForActivityResult(
+        requestNotificationPermissionLauncher = registerForActivityResult(
                 new ActivityResultContracts.RequestPermission(),
                 isAllowed -> {
                     if (!isAllowed) {
@@ -471,7 +484,7 @@ public class LauncherActivity extends BaseActivity {
                     }
 
                     Runnable runnable =
-                            Tools.getWeakReference(mRequestNotificationPermissionRunnable);
+                            Tools.getWeakReference(requestNotificationPermissionRunnable);
                     if (runnable != null) {
                         runnable.run();
                     }
@@ -482,7 +495,7 @@ public class LauncherActivity extends BaseActivity {
     private void registerProgressListeners() {
         ProgressKeeper.addTaskCountListener(doubleLaunchPreventionListener);
         ProgressKeeper.addTaskCountListener(
-                mProgressServiceKeeper = new ProgressServiceKeeper(this)
+                progressServiceKeeper = new ProgressServiceKeeper(this)
         );
         ProgressKeeper.addTaskCountListener(binding.progressLayout);
     }
@@ -542,8 +555,8 @@ public class LauncherActivity extends BaseActivity {
         refreshBackground();
         setPageOpacity(AllSettings.getPageOpacity().getValue());
 
-        mSettingsButtonWrapper = new SettingsButtonWrapper(binding.settingButton);
-        mSettingsButtonWrapper.setOnTypeChangeListener(
+        settingsButtonWrapper = new SettingsButtonWrapper(binding.settingButton);
+        settingsButtonWrapper.setOnTypeChangeListener(
                 type -> ViewAnimUtils.setViewAnim(binding.settingButton, Animations.Pulse)
         );
 
@@ -806,18 +819,16 @@ public class LauncherActivity extends BaseActivity {
             }
         }
 
-        return "a compatible renderer";
+        return FALLBACK_COMPATIBLE_RENDERER_NAME;
     }
 
     private void showModernRendererInstallDialog() {
-        final String mobileGluesUrl = "https://github.com/MobileGL-Dev/MobileGlues-release/releases";
-
         String message =
                 "This Minecraft version needs a compatible modern renderer before launch.\n\n"
                         + "No compatible renderer was detected in the renderer list.\n\n"
                         + "Supported examples include LTW, Mobile Glues, and Krypton.\n\n"
                         + "Recommended download:\n"
-                        + mobileGluesUrl;
+                        + MOBILE_GLUES_URL;
 
         new TipDialog.Builder(this)
                 .setTitle(R.string.generic_warning)
@@ -828,9 +839,9 @@ public class LauncherActivity extends BaseActivity {
                 .setSelectable(true)
                 .setConfirmClickListener(checked -> {
                     try {
-                        startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(mobileGluesUrl)));
+                        startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(MOBILE_GLUES_URL)));
                     } catch (Exception e) {
-                        Logging.e("LauncherActivity", "Failed to open renderer download page.", e);
+                        Logging.e(TAG, "Failed to open renderer download page.", e);
                     }
                 })
                 .showDialog();
@@ -840,7 +851,7 @@ public class LauncherActivity extends BaseActivity {
         String rendererName = getInstalledSupportedRendererName();
         String message =
                 "You already have a compatible renderer installed for this version"
-                        + ("a compatible renderer".equals(rendererName) ? "" : " (" + rendererName + ")")
+                        + (FALLBACK_COMPATIBLE_RENDERER_NAME.equals(rendererName) ? "" : " (" + rendererName + ")")
                         + ".\n\n"
                         + "It is not selected for this version yet.\n\n"
                         + "Open Settings > Video Settings > Renderer, then select the compatible renderer before launching.";
@@ -856,9 +867,9 @@ public class LauncherActivity extends BaseActivity {
     }
 
     private void checkNotice() {
-        checkNotice = TaskExecutors.getDefault().submit(() ->
+        checkNoticeTask = TaskExecutors.getDefault().submit(() ->
                 CheckNewNotice.checkNewNotice(noticeInfo -> {
-                    if (checkNotice.isCancelled() || noticeInfo == null) {
+                    if (checkNoticeTask.isCancelled() || noticeInfo == null) {
                         return;
                     }
 
@@ -1008,10 +1019,10 @@ public class LauncherActivity extends BaseActivity {
         }
 
         if (onSuccessRunnable != null) {
-            mRequestNotificationPermissionRunnable = new WeakReference<>(onSuccessRunnable);
+            requestNotificationPermissionRunnable = new WeakReference<>(onSuccessRunnable);
         }
 
-        mRequestNotificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS);
+        requestNotificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS);
     }
 
     private void setPageOpacity(int pageOpacity) {

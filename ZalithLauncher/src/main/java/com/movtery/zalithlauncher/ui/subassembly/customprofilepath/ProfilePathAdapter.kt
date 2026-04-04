@@ -7,7 +7,6 @@ import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.widget.PopupWindow
-import android.widget.RadioButton
 import androidx.recyclerview.widget.RecyclerView
 import com.movtery.zalithlauncher.R
 import com.movtery.zalithlauncher.databinding.ItemProfilePathBinding
@@ -22,16 +21,28 @@ import com.movtery.zalithlauncher.ui.fragment.FilesFragment
 import com.movtery.zalithlauncher.ui.fragment.FragmentWithAnim
 import com.movtery.zalithlauncher.utils.StoragePermissionsUtils
 import com.movtery.zalithlauncher.utils.ZHTools
+import com.movtery.zalithlauncher.utils.path.PathManager
+import java.io.File
 
 class ProfilePathAdapter(
     private val fragment: FragmentWithAnim,
-    private val view: RecyclerView
-) :
-    RecyclerView.Adapter<ProfilePathAdapter.ViewHolder>() {
-    private val mData: MutableList<ProfileItem> = ArrayList()
-    private val radioButtonList: MutableList<RadioButton> = mutableListOf()
-    //如果没有存储权限，那么旧设置为默认路径
-    private var currentId: String? = if (StoragePermissionsUtils.checkPermissions()) launcherProfile.getValue() else "default"
+    private val recyclerView: RecyclerView
+) : RecyclerView.Adapter<ProfilePathAdapter.ViewHolder>() {
+
+    companion object {
+        private const val DEFAULT_PROFILE_ID = "default"
+    }
+
+    private val items: MutableList<ProfileItem> = mutableListOf()
+
+    // If storage permission is missing, fall back to the default path.
+    private var currentId: String =
+        if (StoragePermissionsUtils.hasCachedPermission()) {
+            launcherProfile.getValue()
+        } else {
+            DEFAULT_PROFILE_ID
+        }
+
     private val managerPopupWindow: PopupWindow = PopupWindow().apply {
         isFocusable = true
         isOutsideTouchable = true
@@ -48,82 +59,77 @@ class ProfilePathAdapter(
     }
 
     override fun onBindViewHolder(holder: ViewHolder, position: Int) {
-        holder.setView(mData[position], position)
+        holder.bind(items[position], position)
     }
 
-    override fun onViewRecycled(holder: ViewHolder) {
-        super.onViewRecycled(holder)
-        radioButtonList.remove(holder.binding.radioButton)
-    }
-
-    override fun getItemCount(): Int = mData.size
+    override fun getItemCount(): Int = items.size
 
     @SuppressLint("NotifyDataSetChanged")
-    fun updateData(data: MutableList<ProfileItem>) {
-        this.mData.clear()
-        this.mData.addAll(data)
-        radioButtonList.apply {
-            forEach { radioButton -> radioButton.isChecked = false }
-            clear()
-        }
+    fun updateData(data: List<ProfileItem>) {
+        items.clear()
+        items.addAll(data)
         notifyDataSetChanged()
-        view.scheduleLayoutAnimation()
+        recyclerView.scheduleLayoutAnimation()
     }
 
     @SuppressLint("NotifyDataSetChanged")
-    private fun refresh() {
-        ProfilePathManager.save(mData)
+    private fun refreshData() {
+        ProfilePathManager.save(items)
         ProfilePathManager.refreshPath()
         notifyDataSetChanged()
-        view.scheduleLayoutAnimation()
+        recyclerView.scheduleLayoutAnimation()
     }
 
     fun closePopupWindow() {
         managerPopupWindow.dismiss()
     }
 
+    @SuppressLint("NotifyDataSetChanged")
     private fun setPathId(id: String) {
         currentId = id
         setCurrentPathId(id)
-        radioButtonList.forEach { radioButton -> radioButton.isChecked = radioButton.tag.toString() == id }
+        notifyDataSetChanged()
     }
 
-    inner class ViewHolder(val binding: ItemProfilePathBinding) :
-        RecyclerView.ViewHolder(binding.root) {
+    inner class ViewHolder(
+        val binding: ItemProfilePathBinding
+    ) : RecyclerView.ViewHolder(binding.root) {
 
-        fun setView(profileItem: ProfileItem, position: Int) {
-            binding.apply {
-                radioButtonList.add(
-                    radioButton.apply {
-                        tag = profileItem.id
-                        isChecked = currentId == profileItem.id
+        fun bind(profileItem: ProfileItem, position: Int) {
+            binding.radioButton.tag = profileItem.id
+            binding.radioButton.isChecked = currentId == profileItem.id
+            binding.title.text = profileItem.title
+            binding.path.text = profileItem.path
+            binding.path.isSelected = true
+
+            val selectClickListener = View.OnClickListener {
+                if (!VersionsManager.canRefresh() || currentId == profileItem.id) {
+                    return@OnClickListener
+                }
+
+                StoragePermissionsUtils.ensurePermissions(
+                    activity = fragment.requireActivity(),
+                    title = R.string.profiles_path_title,
+                    permissionResult = object : StoragePermissionsUtils.PermissionResult {
+                        override fun onGranted() {
+                            setPathId(profileItem.id)
+                        }
+
+                        override fun onCancelled() = Unit
                     }
                 )
-                title.text = profileItem.title
-                path.text = profileItem.path
-                path.isSelected = true
+            }
 
-                val onClickListener = View.OnClickListener {
-                    if (VersionsManager.canRefresh() && currentId != profileItem.id) {
-                        StoragePermissionsUtils.checkPermissions(
-                            activity = fragment.requireActivity(),
-                            title = R.string.profiles_path_title,
-                            permissionGranted = object : StoragePermissionsUtils.PermissionGranted {
-                                override fun granted() {
-                                    setPathId(profileItem.id)
-                                }
+            binding.root.setOnClickListener(selectClickListener)
+            binding.radioButton.setOnClickListener(selectClickListener)
 
-                                override fun cancelled() {}
-                            }
-                        )
-                    }
-                }
-                root.setOnClickListener(onClickListener)
-                radioButton.setOnClickListener(onClickListener)
-
-                operate.setOnClickListener {
-                    showPopupWindow(root, profileItem.id == "default", profileItem, position)
-                }
+            binding.operate.setOnClickListener {
+                showPopupWindow(
+                    anchorView = binding.root,
+                    isDefault = profileItem.id == DEFAULT_PROFILE_ID,
+                    profileItem = profileItem,
+                    itemIndex = position
+                )
             }
         }
 
@@ -135,31 +141,52 @@ class ProfilePathAdapter(
         ) {
             val context = anchorView.context
 
-            val viewBinding = ViewPathManagerBinding.inflate(LayoutInflater.from(context)).apply {
-                val onClickListener = View.OnClickListener { v ->
-                    when (v) {
+            val popupBinding = ViewPathManagerBinding.inflate(LayoutInflater.from(context)).apply {
+                val actionClickListener = View.OnClickListener { clickedView ->
+                    when (clickedView) {
                         gotoView -> {
-                            val bundle = Bundle()
-                            bundle.putString(FilesFragment.BUNDLE_LOCK_PATH, Environment.getExternalStorageDirectory().absolutePath)
-                            bundle.putString(FilesFragment.BUNDLE_LIST_PATH, profileItem.path)
+                            /*val bundle = Bundle().apply {
+                                putString(
+                                    FilesFragment.BUNDLE_LOCK_PATH,
+                                    Environment.getExternalStorageDirectory().absolutePath
+                                )
+                                putString(FilesFragment.BUNDLE_LIST_PATH, profileItem.path)
+                            }*/
+                            val storageRoot = PathManager.findContainingStorageRoot(context, profileItem.path)
+                                ?: PathManager.getPrimaryStorageRoot(context)
+
+                            val bundle = Bundle().apply {
+                                putString(FilesFragment.BUNDLE_LOCK_PATH, storageRoot.absolutePath)
+                                putString(FilesFragment.BUNDLE_LIST_PATH, profileItem.path)
+                            }
+
                             ZHTools.swapFragmentWithAnim(
                                 fragment,
-                                FilesFragment::class.java, FilesFragment.TAG, bundle
+                                FilesFragment::class.java,
+                                FilesFragment.TAG,
+                                bundle
                             )
                         }
+
                         rename -> {
                             EditTextDialog.Builder(context)
                                 .setTitle(R.string.generic_rename)
                                 .setEditText(profileItem.title)
                                 .setAsRequired()
                                 .setConfirmListener { editBox, _ ->
-                                    val string = editBox.text.toString()
+                                    val newTitle = editBox.text.toString().trim()
+                                    if (newTitle.isEmpty()) {
+                                        editBox.error = context.getString(R.string.generic_error_field_empty)
+                                        return@setConfirmListener false
+                                    }
 
-                                    mData[itemIndex].title = string
-                                    refresh()
+                                    items[itemIndex].title = newTitle
+                                    refreshData()
                                     true
-                                }.showDialog()
+                                }
+                                .showDialog()
                         }
+
                         delete -> {
                             TipDialog.Builder(context)
                                 .setTitle(context.getString(R.string.profiles_path_delete_title))
@@ -167,30 +194,36 @@ class ProfilePathAdapter(
                                 .setCancelable(false)
                                 .setConfirmClickListener {
                                     if (currentId == profileItem.id) {
-                                        //如果删除的是当前选中的路径，那么将自动选择为默认路径
-                                        setPathId("default")
+                                        // If the currently selected path is deleted,
+                                        // automatically switch back to the default path.
+                                        setPathId(DEFAULT_PROFILE_ID)
                                     }
-                                    mData.removeAt(itemIndex)
-                                    refresh()
-                                }.showDialog()
+
+                                    items.removeAt(itemIndex)
+                                    refreshData()
+                                }
+                                .showDialog()
                         }
-                        else -> {}
                     }
+
                     managerPopupWindow.dismiss()
                 }
-                gotoView.setOnClickListener(onClickListener)
-                rename.setOnClickListener(onClickListener)
-                delete.setOnClickListener(onClickListener)
+
+                gotoView.setOnClickListener(actionClickListener)
+                rename.setOnClickListener(actionClickListener)
+                delete.setOnClickListener(actionClickListener)
+
                 if (isDefault) {
                     renameLayout.visibility = View.GONE
                     deleteLayout.visibility = View.GONE
                 }
             }
+
             managerPopupWindow.apply {
-                viewBinding.root.measure(0, 0)
-                this.contentView = viewBinding.root
-                this.width = viewBinding.root.measuredWidth
-                this.height = viewBinding.root.measuredHeight
+                popupBinding.root.measure(0, 0)
+                contentView = popupBinding.root
+                width = popupBinding.root.measuredWidth
+                height = popupBinding.root.measuredHeight
                 showAsDropDown(anchorView, anchorView.measuredWidth, 0)
             }
         }

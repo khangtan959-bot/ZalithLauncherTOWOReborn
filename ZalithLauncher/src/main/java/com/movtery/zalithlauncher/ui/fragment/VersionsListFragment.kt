@@ -1,5 +1,6 @@
 package com.movtery.zalithlauncher.ui.fragment
 
+import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
 import android.net.Uri
@@ -47,21 +48,24 @@ import org.greenrobot.eventbus.Subscribe
 import java.util.UUID
 
 class VersionsListFragment : FragmentWithAnim(R.layout.fragment_versions_list) {
+
     companion object {
         const val TAG: String = "VersionsListFragment"
 
         // Temporary SAF storage keys.
-        // This keeps the picked SD-card folder separate from ProfilePathManager,
-        // which is still fully File-path based.
+        // This keeps the selected SD card folder separate from ProfilePathManager,
+        // which is still fully file-path based.
         private const val SD_CARD_PREFS = "sd_card_storage_prefs"
         private const val KEY_SD_TREE_URI = "sd_tree_uri"
         private const val KEY_SD_TREE_NAME = "sd_tree_name"
+        private const val MODE_PRIVATE = 0
+        private const val DEFAULT_PROFILE_ID = "default"
     }
 
     private lateinit var binding: FragmentVersionsListBinding
     private var versionsAdapter: VersionAdapter? = null
     private var profilePathAdapter: ProfilePathAdapter? = null
-    private val favoritesFolderViewList: MutableList<View> = ArrayList()
+    private val favoriteFolderViews = mutableListOf<View>()
 
     private lateinit var openTreeLauncher: ActivityResultLauncher<Uri?>
 
@@ -72,7 +76,6 @@ class VersionsListFragment : FragmentWithAnim(R.layout.fragment_versions_list) {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-
 
         openTreeLauncher = registerForActivityResult(
             ActivityResultContracts.OpenDocumentTree()
@@ -86,163 +89,180 @@ class VersionsListFragment : FragmentWithAnim(R.layout.fragment_versions_list) {
         container: ViewGroup?,
         savedInstanceState: Bundle?
     ): View {
-        val selectorEvent = EventBus.getDefault().getStickyEvent(FileSelectorEvent::class.java)
-
-        selectorEvent?.let { event ->
-            event.path?.let { path ->
-                if (path.isNotEmpty() && !ProfilePathManager.containsPath(path)) {
-                    EditTextDialog.Builder(requireContext())
-                        .setTitle(R.string.profiles_path_create_new_title)
-                        .setAsRequired()
-                        .setConfirmListener { editBox, _ ->
-                            ProfilePathManager.addPath(
-                                ProfileItem(
-                                    UUID.randomUUID().toString(),
-                                    editBox.text.toString(),
-                                    path
-                                )
-                            )
-                            refresh()
-                            true
-                        }.showDialog()
-                }
-            }
-            EventBus.getDefault().removeStickyEvent(event)
-        }
-
-        binding = FragmentVersionsListBinding.inflate(layoutInflater)
+        handlePendingFileSelectorEvent()
+        binding = FragmentVersionsListBinding.inflate(inflater, container, false)
         return binding.root
     }
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
-        binding.apply {
-            installNew.setOnClickListener {
-                ZHTools.swapFragmentWithAnim(
-                    this@VersionsListFragment,
-                    VersionSelectorFragment::class.java,
-                    VersionSelectorFragment.TAG,
-                    null
-                )
-            }
-
-            fun refreshFavoritesFolderTab(index: Int) {
-                when (index) {
-                    0 -> refreshVersions(true)
-                    else -> refreshVersions(
-                        false,
-                        FavoritesVersionUtils.getFavoritesStructure().keys.toList()[index - 1]
-                    )
-                }
-            }
-
-            favoritesFolderTab.observeIndexChange { _, toIndex, reselect, fromUser ->
-                if (fromUser && !reselect) {
-                    refreshFavoritesFolderTab(toIndex)
-                }
-            }
-
-            favoritesActions.setOnClickListener { showFavoritesActionPopupWindow(it) }
-
-            versionsAdapter = VersionAdapter(
-                this@VersionsListFragment,
-                object : VersionAdapter.OnVersionItemClickListener {
-                    override fun showFavoritesDialog(versionName: String) {
-                        if (FavoritesVersionUtils.getFavoritesStructure().isNotEmpty()) {
-                            FavoritesVersionDialog(requireActivity(), versionName) {
-                                refreshFavoritesFolderTab(favoritesFolderTab.currentItemIndex)
-                            }.show()
-                        } else {
-                            Toast.makeText(
-                                requireActivity(),
-                                getString(R.string.version_manager_favorites_dialog_no_folders),
-                                Toast.LENGTH_SHORT
-                            ).show()
-                        }
-                    }
-
-                    override fun isVersionFavorited(versionName: String): Boolean {
-                        if (favoritesFolderTab.currentItemIndex != 0) {
-                            return true
-                        }
-                        return FavoritesVersionUtils.getFavoritesStructure().values.any {
-                            it.contains(versionName)
-                        }
-                    }
-                }
-            )
-
-            versions.apply {
-                layoutAnimation = LayoutAnimationController(
-                    AnimationUtils.loadAnimation(view.context, R.anim.fade_downwards)
-                )
-                layoutManager = LinearLayoutManager(requireContext())
-                adapter = versionsAdapter
-            }
-
-            profilePathAdapter = ProfilePathAdapter(this@VersionsListFragment, profilesPath)
-            profilesPath.apply {
-                layoutAnimation = LayoutAnimationController(
-                    AnimationUtils.loadAnimation(view.context, R.anim.fade_downwards)
-                )
-                layoutManager = LinearLayoutManager(requireContext())
-                adapter = profilePathAdapter
-            }
-
-            refreshButton.setOnClickListener {
-                refreshButton.isEnabled = false
-                refresh(refreshVersions = true, refreshVersionInfo = true)
-            }
-
-            createPathButton.setOnClickListener {
-                StoragePermissionsUtils.checkPermissions(
-                    activity = requireActivity(),
-                    title = R.string.profiles_path_create_new,
-                    permissionGranted = object : StoragePermissionsUtils.PermissionGranted {
-                        override fun granted() {
-                            val bundle = Bundle()
-                            bundle.putBoolean(FilesFragment.BUNDLE_SELECT_FOLDER_MODE, true)
-                            bundle.putBoolean(FilesFragment.BUNDLE_SHOW_FILE, false)
-                            bundle.putBoolean(FilesFragment.BUNDLE_REMOVE_LOCK_PATH, false)
-                            ZHTools.swapFragmentWithAnim(
-                                this@VersionsListFragment,
-                                FilesFragment::class.java,
-                                FilesFragment.TAG,
-                                bundle
-                            )
-                        }
-
-                        override fun cancelled() {}
-                    }
-                )
-            }
-
-            // Requires a new button in fragment_versions_list.xml:
-            // @+id/pick_sd_card_button
-            pickSdCardButton.visibility = View.GONE
-            pickSdCardButton.setOnClickListener {
-                openTreeLauncher.launch(null)
-            }
-
-            returnButton.setOnClickListener {
-                ZHTools.onBackPressed(requireActivity())
-            }
-        }
-
+        setupButtons()
+        setupAdapters()
         refresh()
     }
 
+    private fun handlePendingFileSelectorEvent() {
+        val selectorEvent = EventBus.getDefault().getStickyEvent(FileSelectorEvent::class.java) ?: return
+
+        selectorEvent.path?.let { path ->
+            if (path.isNotEmpty() && !ProfilePathManager.containsPath(path)) {
+                EditTextDialog.Builder(requireContext())
+                    .setTitle(R.string.profiles_path_create_new_title)
+                    .setAsRequired()
+                    .setConfirmListener { editBox, _ ->
+                        val title = editBox.text.toString().trim()
+                        if (title.isEmpty()) {
+                            editBox.error = getString(R.string.generic_error_field_empty)
+                            return@setConfirmListener false
+                        }
+
+                        ProfilePathManager.addPath(
+                            ProfileItem(
+                                UUID.randomUUID().toString(),
+                                title,
+                                path
+                            )
+                        )
+                        refresh()
+                        true
+                    }
+                    .showDialog()
+            }
+        }
+
+        EventBus.getDefault().removeStickyEvent(selectorEvent)
+    }
+
+    private fun setupButtons() {
+        binding.installNew.setOnClickListener {
+            ZHTools.swapFragmentWithAnim(
+                this@VersionsListFragment,
+                VersionSelectorFragment::class.java,
+                VersionSelectorFragment.TAG,
+                null
+            )
+        }
+
+        binding.favoritesFolderTab.observeIndexChange { _, toIndex, reselect, fromUser ->
+            if (fromUser && !reselect) {
+                refreshFavoritesSelection(toIndex)
+            }
+        }
+
+        binding.favoritesActions.setOnClickListener {
+            showFavoritesActionPopupWindow(it)
+        }
+
+        binding.refreshButton.setOnClickListener {
+            binding.refreshButton.isEnabled = false
+            refresh(refreshVersions = true, refreshVersionInfo = true)
+        }
+
+        binding.createPathButton.setOnClickListener {
+            StoragePermissionsUtils.ensurePermissions(
+                activity = requireActivity(),
+                title = R.string.profiles_path_create_new,
+                permissionResult = object : StoragePermissionsUtils.PermissionResult {
+                    override fun onGranted() {
+                        val bundle = Bundle().apply {
+                            putBoolean(FilesFragment.BUNDLE_SELECT_FOLDER_MODE, true)
+                            putBoolean(FilesFragment.BUNDLE_SHOW_FILE, false)
+                            putBoolean(FilesFragment.BUNDLE_REMOVE_LOCK_PATH, false)
+                        }
+
+                        ZHTools.swapFragmentWithAnim(
+                            this@VersionsListFragment,
+                            FilesFragment::class.java,
+                            FilesFragment.TAG,
+                            bundle
+                        )
+                    }
+
+                    override fun onCancelled() = Unit
+                }
+            )
+        }
+
+        // Requires a new button in fragment_versions_list.xml:
+        // @+id/pick_sd_card_button
+        binding.pickSdCardButton.visibility = View.GONE
+        binding.pickSdCardButton.setOnClickListener {
+            openTreeLauncher.launch(null)
+        }
+
+        binding.returnButton.setOnClickListener {
+            ZHTools.onBackPressed(requireActivity())
+        }
+    }
+
+    private fun setupAdapters() {
+        versionsAdapter = VersionAdapter(
+            this@VersionsListFragment,
+            object : VersionAdapter.OnVersionItemClickListener {
+                override fun showFavoritesDialog(versionName: String) {
+                    if (FavoritesVersionUtils.getFavoritesStructure().isNotEmpty()) {
+                        FavoritesVersionDialog(requireActivity(), versionName) {
+                            refreshFavoritesSelection(binding.favoritesFolderTab.currentItemIndex)
+                        }.show()
+                    } else {
+                        Toast.makeText(
+                            requireActivity(),
+                            getString(R.string.version_manager_favorites_dialog_no_folders),
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    }
+                }
+
+                override fun isVersionFavorited(versionName: String): Boolean {
+                    if (binding.favoritesFolderTab.currentItemIndex != 0) {
+                        return true
+                    }
+
+                    return FavoritesVersionUtils.getFavoritesStructure().values.any { versions ->
+                        versions.contains(versionName)
+                    }
+                }
+            }
+        )
+
+        binding.versions.apply {
+            layoutAnimation = LayoutAnimationController(
+                AnimationUtils.loadAnimation(view?.context ?: requireContext(), R.anim.fade_downwards)
+            )
+            layoutManager = LinearLayoutManager(requireContext())
+            adapter = versionsAdapter
+        }
+
+        profilePathAdapter = ProfilePathAdapter(this@VersionsListFragment, binding.profilesPath)
+        binding.profilesPath.apply {
+            layoutAnimation = LayoutAnimationController(
+                AnimationUtils.loadAnimation(view?.context ?: requireContext(), R.anim.fade_downwards)
+            )
+            layoutManager = LinearLayoutManager(requireContext())
+            adapter = profilePathAdapter
+        }
+    }
+
+    private fun refreshFavoritesSelection(index: Int) {
+        when (index) {
+            0 -> refreshVersions(true)
+            else -> {
+                val folderNames = FavoritesVersionUtils.getFavoritesStructure().keys.toList()
+                val folderName = folderNames.getOrNull(index - 1)
+                refreshVersions(false, folderName)
+            }
+        }
+    }
+
     /**
-     * IMPORTANT:
-     * We do NOT add the tree Uri into ProfilePathManager.
-     * ProfilePathManager and the install pipeline are still File-path based,
-     * and saving a content:// tree Uri there will break installs.
+     * Important:
+     * We do not add the tree Uri into ProfilePathManager.
+     * ProfilePathManager and the install pipeline are still file-path based,
+     * and saving a content:// tree Uri there would break installs.
      *
-     * For now, this only persists the selected SD-card folder separately.
+     * For now, this only stores the selected SD card folder separately.
      */
     private fun handlePickedTreeUri(uri: Uri?) {
-        if (uri == null) {
-            return
-        }
+        if (uri == null) return
 
         val flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or
                 Intent.FLAG_GRANT_WRITE_URI_PERMISSION
@@ -250,7 +270,8 @@ class VersionsListFragment : FragmentWithAnim(R.layout.fragment_versions_list) {
         try {
             requireContext().contentResolver.takePersistableUriPermission(uri, flags)
         } catch (_: SecurityException) {
-            // Some providers may already have granted access or reject re-persisting it.
+            // Some providers may already have granted access,
+            // or may reject persisting the permission again.
         }
 
         EditTextDialog.Builder(requireContext())
@@ -278,7 +299,7 @@ class VersionsListFragment : FragmentWithAnim(R.layout.fragment_versions_list) {
     }
 
     private fun getPrefs(): SharedPreferences {
-        return requireContext().getSharedPreferences(SD_CARD_PREFS, 0)
+        return requireContext().getSharedPreferences(SD_CARD_PREFS, Context.MODE_PRIVATE)
     }
 
     private fun saveSdTree(uri: Uri, name: String) {
@@ -292,19 +313,22 @@ class VersionsListFragment : FragmentWithAnim(R.layout.fragment_versions_list) {
         return getPrefs().getString(KEY_SD_TREE_NAME, null)
     }
 
-    private fun refresh(refreshVersions: Boolean = false, refreshVersionInfo: Boolean = false) {
+    private fun refresh(
+        refreshVersions: Boolean = false,
+        refreshVersionInfo: Boolean = false
+    ) {
         ProfilePathManager.refreshPath()
 
         if (refreshVersions) {
-            VersionsManager.refresh("VersionListFragment:refresh", refreshVersionInfo)
+            VersionsManager.refresh("VersionsListFragment:refresh", refreshVersionInfo)
         } else {
             refreshFavoritesFolderAndVersions()
         }
 
-        val path: MutableList<ProfileItem> = ArrayList<ProfileItem>().apply {
+        val paths = buildList {
             add(
                 ProfileItem(
-                    "default",
+                    DEFAULT_PROFILE_ID,
                     getString(R.string.profiles_path_default),
                     PathManager.DIR_GAME_HOME
                 )
@@ -312,70 +336,64 @@ class VersionsListFragment : FragmentWithAnim(R.layout.fragment_versions_list) {
             addAll(ProfilePathManager.getAllPath())
         }
 
-        profilePathAdapter?.updateData(path)
+        profilePathAdapter?.updateData(paths as MutableList<ProfileItem>)
     }
 
     private fun refreshVersions(all: Boolean = true, favoritesFolder: String? = null) {
-        versionsAdapter?.let {
-            val versions = VersionsManager.getVersions()
+        val adapter = versionsAdapter ?: return
+        val versions = VersionsManager.getVersions()
 
-            fun getFilteredVersions(): List<Version> {
-                if (all) return versions
-
-                val folderName = favoritesFolder ?: ""
-                val folderVersions = FavoritesVersionUtils.getValidVersions(folderName)
-
-                return ArrayList<Version>().apply {
-                    versions.forEach { version ->
-                        if (folderVersions.contains(version.getVersionName())) {
-                            add(version)
-                        }
-                    }
-                }
+        val filteredVersions: List<Version> = if (all) {
+            versions
+        } else {
+            val folderName = favoritesFolder.orEmpty()
+            val folderVersions = FavoritesVersionUtils.getValidVersions(folderName)
+            versions.filter { version ->
+                folderVersions.contains(version.getVersionName())
             }
-
-            val currentIndex = it.refreshVersions(getFilteredVersions())
-            binding.versions.scrollToPosition(currentIndex)
-            binding.versions.scheduleLayoutAnimation()
         }
+
+        val currentIndex = adapter.refreshVersions(filteredVersions)
+        binding.versions.scrollToPosition(currentIndex)
+        binding.versions.scheduleLayoutAnimation()
     }
 
     private fun refreshFavoritesFolderAndVersions() {
         binding.favoritesFolderTab.setCurrentItem(0)
         refreshVersions()
 
-        favoritesFolderViewList.forEach { view ->
+        favoriteFolderViews.forEach { view ->
             binding.favoritesFolderTab.removeView(view)
         }
-        favoritesFolderViewList.clear()
-
-        fun createView(folderName: String): AnimRelativeLayout {
-            return ItemFavoriteFolderBinding.inflate(layoutInflater).apply {
-                name.text = folderName
-                root.layoutParams = DslTabLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT
-                )
-                root.setOnLongClickListener {
-                    showFavoritesDeletePopupWindow(root, folderName)
-                    true
-                }
-            }.root
-        }
+        favoriteFolderViews.clear()
 
         FavoritesVersionUtils.getFavoritesStructure().forEach { (folderName, _) ->
-            val view = createView(folderName)
-            favoritesFolderViewList.add(view)
-            binding.favoritesFolderTab.addView(view)
+            val folderView = createFavoriteFolderView(folderName)
+            favoriteFolderViews.add(folderView)
+            binding.favoritesFolderTab.addView(folderView)
         }
     }
 
-    private fun refreshActionPopupWindow(anchorView: View, binding: ViewBinding) {
+    private fun createFavoriteFolderView(folderName: String): AnimRelativeLayout {
+        return ItemFavoriteFolderBinding.inflate(layoutInflater).apply {
+            name.text = folderName
+            root.layoutParams = DslTabLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+            root.setOnLongClickListener {
+                showFavoritesDeletePopupWindow(root, folderName)
+                true
+            }
+        }.root
+    }
+
+    private fun refreshActionPopupWindow(anchorView: View, popupBinding: ViewBinding) {
         favoritesActionPopupWindow.apply {
-            binding.root.measure(0, 0)
-            contentView = binding.root
-            width = binding.root.measuredWidth
-            height = binding.root.measuredHeight
+            popupBinding.root.measure(0, 0)
+            contentView = popupBinding.root
+            width = popupBinding.root.measuredWidth
+            height = popupBinding.root.measuredHeight
             showAsDropDown(anchorView)
         }
     }
@@ -393,10 +411,18 @@ class VersionsListFragment : FragmentWithAnim(R.layout.fragment_versions_list) {
                         .setTitle(R.string.version_manager_favorites_write_folder_name)
                         .setAsRequired()
                         .setConfirmListener { editText, _ ->
-                            FavoritesVersionUtils.addFolder(editText.text.toString())
+                            val folderName = editText.text.toString().trim()
+                            if (folderName.isEmpty()) {
+                                editText.error = getString(R.string.generic_error_field_empty)
+                                return@setConfirmListener false
+                            }
+
+                            FavoritesVersionUtils.addFolder(folderName)
                             refreshFavoritesFolderAndVersions()
                             true
-                        }.showDialog()
+                        }
+                        .showDialog()
+
                     favoritesActionPopupWindow.dismiss()
                 }
             }
@@ -419,7 +445,9 @@ class VersionsListFragment : FragmentWithAnim(R.layout.fragment_versions_list) {
                         .setConfirmClickListener {
                             FavoritesVersionUtils.removeFolder(folderName)
                             refreshFavoritesFolderAndVersions()
-                        }.showDialog()
+                        }
+                        .showDialog()
+
                     favoritesActionPopupWindow.dismiss()
                 }
             }
@@ -428,27 +456,25 @@ class VersionsListFragment : FragmentWithAnim(R.layout.fragment_versions_list) {
 
     @Subscribe
     fun event(event: RefreshVersionsEvent) {
-        binding.apply {
-            TaskExecutors.runInUIThread {
-                when (event.mode) {
-                    START -> {
-                        refreshButton.isEnabled = false
-                        favoritesFolderTab.isEnabled = false
-                        versions.visibility = View.GONE
-                        refreshVersions.visibility = View.VISIBLE
-                    }
-
-                    END -> {
-                        refreshFavoritesFolderAndVersions()
-                        favoritesFolderTab.isEnabled = true
-                        refreshButton.isEnabled = true
-                        versions.visibility = View.VISIBLE
-                        refreshVersions.visibility = View.GONE
-                    }
+        TaskExecutors.runInUIThread {
+            when (event.mode) {
+                START -> {
+                    binding.refreshButton.isEnabled = false
+                    binding.favoritesFolderTab.isEnabled = false
+                    binding.versions.visibility = View.GONE
+                    binding.refreshVersions.visibility = View.VISIBLE
                 }
 
-                closeAllPopupWindow()
+                END -> {
+                    refreshFavoritesFolderAndVersions()
+                    binding.favoritesFolderTab.isEnabled = true
+                    binding.refreshButton.isEnabled = true
+                    binding.versions.visibility = View.VISIBLE
+                    binding.refreshVersions.visibility = View.GONE
+                }
             }
+
+            closeAllPopupWindow()
         }
     }
 

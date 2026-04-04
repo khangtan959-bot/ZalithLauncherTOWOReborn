@@ -10,12 +10,13 @@ import java.util.TimerTask
 import java.util.concurrent.Future
 
 abstract class FileHandler(
-    protected val context: Context,
+    protected val context: Context
 ) {
     protected var currentTask: Future<*>? = null
+
     private var timer: Timer? = null
-    private var lastSize: Long = 0
-    private var lastTime: Long = ZHTools.getCurrentTimeMillis()
+    private var lastProcessedSize: Long = 0
+    private var lastUpdateTime: Long = ZHTools.getCurrentTimeMillis()
 
     protected fun start(progress: FileSearchProgress) {
         TaskExecutors.runInUIThread {
@@ -24,6 +25,7 @@ abstract class FileHandler(
                 onEnd()
                 true
             }
+
             dialog.updateText(context.getString(R.string.file_operation_file, "0 B", "0 B", 0))
 
             currentTask = TaskExecutors.getDefault().submit {
@@ -37,12 +39,13 @@ abstract class FileHandler(
                         val processedSize = totalSize - pendingSize
 
                         val currentTime = ZHTools.getCurrentTimeMillis()
-                        val timeElapsed = (currentTime - lastTime) / 1000.0
-                        val sizeChange = processedSize - lastSize
-                        val rate = (if (timeElapsed > 0) sizeChange / timeElapsed else 0.0).toLong()
+                        val timeElapsedSeconds = (currentTime - lastUpdateTime) / 1000.0
+                        val sizeDelta = processedSize - lastProcessedSize
+                        val transferRate =
+                            (if (timeElapsedSeconds > 0) sizeDelta / timeElapsedSeconds else 0.0).toLong()
 
-                        lastSize = processedSize
-                        lastTime = currentTime
+                        lastProcessedSize = processedSize
+                        lastUpdateTime = currentTime
 
                         TaskExecutors.runInUIThread {
                             dialog.updateText(
@@ -53,7 +56,7 @@ abstract class FileHandler(
                                     progress.getCurrentFileCount()
                                 )
                             )
-                            dialog.updateRate(rate)
+                            dialog.updateRate(transferRate)
                             dialog.updateProgress(
                                 processedSize.toDouble(),
                                 totalSize.toDouble()
@@ -63,7 +66,10 @@ abstract class FileHandler(
                 }, 0, 100)
 
                 searchFilesToProcess()
-                currentTask?.let { task -> if (task.isCancelled) return@submit }
+                currentTask?.let { task ->
+                    if (task.isCancelled) return@submit
+                }
+
                 processFile()
 
                 TaskExecutors.runInUIThread { dialog.dismiss() }
@@ -80,10 +86,10 @@ abstract class FileHandler(
     abstract fun onEnd()
 
     private fun cancelTask() {
-        currentTask?.let {
-            if (!currentTask!!.isDone) {
-                currentTask?.cancel(true)
-                timer?.let { timer?.cancel() }
+        currentTask?.let { task ->
+            if (!task.isDone) {
+                task.cancel(true)
+                timer?.cancel()
             }
         }
     }

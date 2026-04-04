@@ -8,14 +8,15 @@ import java.io.File
 import java.util.concurrent.atomic.AtomicLong
 
 class FileDeletionHandler(
-    mContext: Context,
-    private val mSelectedFiles: List<File>,
+    context: Context,
+    private val selectedFiles: List<File>,
     private val endTask: Task<*>?
-) : FileHandler(mContext), FileSearchProgress {
+) : FileHandler(context), FileSearchProgress {
+
     private val foundFiles = mutableListOf<File>()
     private val totalFileSize = AtomicLong(0)
-    private val fileSize = AtomicLong(0)
-    private val fileCount = AtomicLong(0)
+    private val pendingFileSize = AtomicLong(0)
+    private val pendingFileCount = AtomicLong(0)
 
     fun start() {
         super.start(this)
@@ -23,50 +24,73 @@ class FileDeletionHandler(
 
     private fun addFile(file: File) {
         foundFiles.add(file)
-        fileCount.addAndGet(1)
-        fileSize.addAndGet(FileUtils.sizeOf(file))
+        pendingFileCount.incrementAndGet()
+        pendingFileSize.addAndGet(FileUtils.sizeOf(file))
     }
 
     private fun addDirectory(directory: File) {
-        if (directory.isFile) addFile(directory)
-        else if (directory.isDirectory) {
-            directory.listFiles()?.forEach {
-                if (it.isFile) addFile(it)
-                else if (it.isDirectory) addDirectory(it)
+        if (directory.isFile) {
+            addFile(directory)
+            return
+        }
+
+        if (!directory.isDirectory) {
+            return
+        }
+
+        directory.listFiles()?.forEach { file ->
+            when {
+                file.isFile -> addFile(file)
+                file.isDirectory -> addDirectory(file)
             }
         }
     }
 
     override fun searchFilesToProcess() {
-        mSelectedFiles.forEach {
-            currentTask?.let { task -> if (task.isCancelled) return@forEach }
+        selectedFiles.forEach { file ->
+            currentTask?.let { task ->
+                if (task.isCancelled) return@forEach
+            }
 
-            if (it.isFile) addFile(it)
-            else if (it.isDirectory) addDirectory(it)
+            when {
+                file.isFile -> addFile(file)
+                file.isDirectory -> addDirectory(file)
+            }
         }
-        currentTask?.let { task -> if (task.isCancelled) return }
-        totalFileSize.set(fileSize.get())
+
+        currentTask?.let { task ->
+            if (task.isCancelled) return
+        }
+
+        totalFileSize.set(pendingFileSize.get())
     }
 
     override fun processFile() {
-        Logging.i("FileDeletionHandler", "Delete files (total files: $fileCount)")
-        foundFiles.parallelStream().forEach {
-            currentTask?.let { task -> if (task.isCancelled) return@forEach }
+        Logging.i("FileDeletionHandler", "Delete files (total files: $pendingFileCount)")
 
-            fileSize.addAndGet(-FileUtils.sizeOf(it))
-            fileCount.getAndDecrement()
-            FileUtils.deleteQuietly(it)
+        foundFiles.parallelStream().forEach { file ->
+            currentTask?.let { task ->
+                if (task.isCancelled) return@forEach
+            }
+
+            pendingFileSize.addAndGet(-FileUtils.sizeOf(file))
+            pendingFileCount.decrementAndGet()
+            FileUtils.deleteQuietly(file)
         }
-        currentTask?.let { task -> if (task.isCancelled) return }
-        //剩下的都是空文件夹，直接删除
-        mSelectedFiles.forEach { FileUtils.deleteQuietly(it) }
+
+        currentTask?.let { task ->
+            if (task.isCancelled) return
+        }
+
+        // The remaining entries are empty folders, so delete them directly.
+        selectedFiles.forEach { FileUtils.deleteQuietly(it) }
     }
 
-    override fun getCurrentFileCount() = fileCount.get()
+    override fun getCurrentFileCount(): Long = pendingFileCount.get()
 
-    override fun getTotalSize() = totalFileSize.get()
+    override fun getTotalSize(): Long = totalFileSize.get()
 
-    override fun getPendingSize() = fileSize.get()
+    override fun getPendingSize(): Long = pendingFileSize.get()
 
     override fun onEnd() {
         endTask?.execute()

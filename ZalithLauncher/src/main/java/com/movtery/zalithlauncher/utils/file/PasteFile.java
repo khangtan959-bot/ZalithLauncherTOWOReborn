@@ -13,8 +13,9 @@ import java.util.List;
 
 public class PasteFile {
     private static final PasteFile instance = new PasteFile();
+
     private final List<File> copyFiles = new ArrayList<>();
-    private File mRoot = null;
+    private File root = null;
     private PasteType pasteType = null;
 
     private PasteFile() {
@@ -31,7 +32,7 @@ public class PasteFile {
 
     public void setPaste(File root, List<File> files, PasteType type) {
         setCopyFiles(files);
-        this.mRoot = root;
+        this.root = root;
         this.pasteType = type;
     }
 
@@ -39,12 +40,32 @@ public class PasteFile {
         return pasteType;
     }
 
-    public void pasteFiles(Activity activity, File target, FileCopyHandler.FileExtensionGetter fileExtensionGetter, Task<?> endTask) {
+    public void pasteFiles(
+            Activity activity,
+            File target,
+            FileCopyHandler.FileExtensionGetter fileExtensionGetter,
+            Task<?> endTask
+    ) {
         if (copyFiles.isEmpty()) {
-            TaskExecutors.runInUIThread(() -> Toast.makeText(activity, activity.getString(R.string.file_does_not_exist), Toast.LENGTH_SHORT).show());
+            TaskExecutors.runInUIThread(() ->
+                    Toast.makeText(
+                            activity,
+                            activity.getString(R.string.file_does_not_exist),
+                            Toast.LENGTH_SHORT
+                    ).show()
+            );
             return;
         }
-        new FileCopyHandler(activity, pasteType, copyFiles, mRoot, target, fileExtensionGetter, endTask.beforeStart(this::resetState)).start();
+
+        new FileCopyHandler(
+                activity,
+                pasteType,
+                copyFiles,
+                root,
+                target,
+                fileExtensionGetter,
+                endTask.beforeStart(this::resetState)
+        ).start();
     }
 
     private void resetState() {
@@ -53,6 +74,7 @@ public class PasteFile {
     }
 
     public enum PasteType {
-        COPY, MOVE
+        COPY,
+        MOVE
     }
 }

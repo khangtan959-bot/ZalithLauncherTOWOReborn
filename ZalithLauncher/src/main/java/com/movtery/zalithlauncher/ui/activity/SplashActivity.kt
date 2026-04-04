@@ -25,10 +25,10 @@ import net.kdt.pojavlaunch.Tools
 
 @SuppressLint("CustomSplashScreen")
 class SplashActivity : BaseActivity() {
-    private var isStarted: Boolean = false
+    private var isStarted = false
     private lateinit var binding: ActivitySplashBinding
     private lateinit var installableAdapter: InstallableAdapter
-    private val items: MutableList<InstallableItem> = ArrayList()
+    private val items = mutableListOf<InstallableItem>()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -38,21 +38,7 @@ class SplashActivity : BaseActivity() {
         binding = ActivitySplashBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
-        binding.titleText.text = InfoDistributor.APP_NAME
-        binding.recyclerView.apply {
-            layoutManager = LinearLayoutManager(this@SplashActivity)
-            adapter = installableAdapter
-        }
-
-        binding.startButton.apply {
-            setOnClickListener {
-                if (isStarted) return@setOnClickListener
-                isStarted = true
-                binding.splashText.setText(R.string.splash_screen_installing)
-                installableAdapter.startAllTasks()
-            }
-            isClickable = false
-        }
+        setupViews()
 
         if (!Tools.checkStorageRoot()) {
             startActivity(Intent(this, MissingStorageActivity::class.java))
@@ -60,25 +46,57 @@ class SplashActivity : BaseActivity() {
             return
         }
 
-        //如果安卓版本小于等于9，则检查存储权限（不是管理所有文件权限），拥有存储权限会保证文件、文件夹正常创建
-        //但是并不强制要求用户必须授予权限，如果用户拒绝，那么之后产生的问题将由用户承担
-        if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.P && !StoragePermissionsUtils.hasStoragePermissions(this)) {
+        handleInitialStoragePermissionCheck()
+    }
+
+    private fun setupViews() {
+        binding.titleText.text = InfoDistributor.APP_NAME
+
+        binding.recyclerView.apply {
+            layoutManager = LinearLayoutManager(this@SplashActivity)
+            adapter = installableAdapter
+        }
+
+        binding.startButton.apply {
+            isEnabled = false
+            setOnClickListener {
+                if (isStarted) return@setOnClickListener
+
+                isStarted = true
+                binding.splashText.setText(R.string.splash_screen_installing)
+                installableAdapter.startAllTasks()
+            }
+        }
+    }
+
+    private fun handleInitialStoragePermissionCheck() {
+        // On Android 9 and below, check legacy storage permissions instead of
+        // the Android 11+ "manage all files" permission.
+        //
+        // The launcher does not strictly require the user to grant this permission,
+        // but having it helps ensure files and folders can be created normally.
+        if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.P &&
+            !StoragePermissionsUtils.hasLegacyStoragePermissions(this)
+        ) {
             TipDialog.Builder(this)
                 .setTitle(R.string.generic_warning)
                 .setMessage(InfoCenter.replaceName(this, R.string.permissions_write_external_storage))
                 .setWarning()
-                .setConfirmClickListener { requestStoragePermissions() }
-                .setCancelClickListener { checkEnd() } //用户取消，那就跟随用户的意愿
+                .setConfirmClickListener { requestLegacyStoragePermissions() }
+                .setCancelClickListener { checkEnd() } // Respect the user's choice.
                 .showDialog()
         } else {
             checkEnd()
         }
     }
 
-    private fun requestStoragePermissions() {
+    private fun requestLegacyStoragePermissions() {
         ActivityCompat.requestPermissions(
             this,
-            arrayOf(Manifest.permission.WRITE_EXTERNAL_STORAGE),
+            arrayOf(
+                Manifest.permission.READ_EXTERNAL_STORAGE,
+                Manifest.permission.WRITE_EXTERNAL_STORAGE
+            ),
             STORAGE_PERMISSION_REQUEST_CODE
         )
     }
@@ -89,38 +107,42 @@ class SplashActivity : BaseActivity() {
         grantResults: IntArray
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+
         if (requestCode == STORAGE_PERMISSION_REQUEST_CODE) {
-            //无论用户是否授予了权限，都会完成检查，因为启动器并不强制要求权限
-            //但是一旦因为存储权限出现了问题，那么将由用户自行承担后果
+            // Continue regardless of whether the user granted permission.
+            // The launcher does not force this permission, but any problems
+            // caused by denying it will affect later file operations.
             checkEnd()
         }
     }
 
     private fun initItems() {
-        Components.entries.forEach {
-            val unpackComponentsTask = UnpackComponentsTask(this, it)
-            if (!unpackComponentsTask.isCheckFailed()) {
+        Components.entries.forEach { component ->
+            val unpackTask = UnpackComponentsTask(this, component)
+            if (!unpackTask.isCheckFailed()) {
                 items.add(
                     InstallableItem(
-                        it.displayName,
-                        it.summary?.let { it1 -> getString(it1) },
-                        unpackComponentsTask
+                        component.displayName,
+                        component.summary?.let(::getString),
+                        unpackTask
                     )
                 )
             }
         }
-        Jre.entries.forEach {
-            val unpackJreTask = UnpackJreTask(this, it)
-            if (!unpackJreTask.isCheckFailed()) {
+
+        Jre.entries.forEach { jre ->
+            val unpackTask = UnpackJreTask(this, jre)
+            if (!unpackTask.isCheckFailed()) {
                 items.add(
                     InstallableItem(
-                        it.jreName,
-                        getString(it.summary),
-                        unpackJreTask
+                        jre.jreName,
+                        getString(jre.summary),
+                        unpackTask
                     )
                 )
             }
         }
+
         items.sort()
         installableAdapter = InstallableAdapter(items) {
             toMain()
@@ -129,11 +151,12 @@ class SplashActivity : BaseActivity() {
 
     private fun checkEnd() {
         installableAdapter.checkAllTask()
+
         Task.runTask {
             UnpackSingleFilesTask(this).run()
         }.execute()
 
-        binding.startButton.isClickable = true
+        binding.startButton.isEnabled = true
     }
 
     private fun toMain() {
@@ -142,6 +165,6 @@ class SplashActivity : BaseActivity() {
     }
 
     companion object {
-        private const val STORAGE_PERMISSION_REQUEST_CODE: Int = 100
+        private const val STORAGE_PERMISSION_REQUEST_CODE = 100
     }
 }

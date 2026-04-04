@@ -378,7 +378,7 @@
     <string name="file_delete_multiple_items_message">This operation will permanently delete all selected items, please proceed with caution!</string>
     <string name="file_rename_exitis">File name conflicts with an existing file!</string>
     <string name="file_external_storage">External storage directory</string>
-    <string name="file_software_private">Software private directory</string>
+    <string name="file_software_private">Custom Storage Path</string>
     <string name="file_multi_select_mode">Enable multi-select mode</string>
     <string name="file_multi_select_mode_title">Multi-select items</string>
     <string name="file_multi_select_mode_message">Currently selected a total of %d items</string>

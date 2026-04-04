@@ -34,10 +34,12 @@ import net.kdt.pojavlaunch.Tools
 import net.kdt.pojavlaunch.contracts.OpenDocumentWithExtension
 import org.greenrobot.eventbus.EventBus
 import java.io.File
-import java.util.Objects
-import java.util.function.Consumer
+import com.movtery.zalithlauncher.utils.path.PathManager
 
 class FilesFragment : FragmentWithAnim(R.layout.fragment_files) {
+    private var primaryStorageRoot: File? = null
+    private var removableStorageRoot: File? = null
+
     companion object {
         const val TAG: String = "FilesFragment"
         const val BUNDLE_LOCK_PATH: String = "bundle_lock_path"
@@ -52,36 +54,26 @@ class FilesFragment : FragmentWithAnim(R.layout.fragment_files) {
     }
 
     private lateinit var binding: FragmentFilesBinding
-    private lateinit var mSearchViewWrapper: SearchViewWrapper
+    private lateinit var searchViewWrapper: SearchViewWrapper
     private var openDocumentLauncher: ActivityResultLauncher<Any?>? = null
-    private var mShowFiles = false
-    private var mShowFolders = false
-    private var mQuickAccessPaths = false
-    private var mMultiSelectMode = false
-    private var mSelectFolderMode = false
-    private var mRemoveLockPath = false
-    private var mTitleRemoveLockPath = false
-    private var mLockPath: String? = null
-    private var mListPath: String? = null
+
+    private var showFiles = false
+    private var showFolders = false
+    private var quickAccessPaths = false
+    private var multiSelectMode = false
+    private var selectFolderMode = false
+    private var removeLockPath = false
+    private var titleRemoveLockPath = false
+    private var lockPath: String? = null
+    private var listPath: String? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        openDocumentLauncher = registerForActivityResult(OpenDocumentWithExtension(null, true)) { uris: List<Uri>? ->
-            uris?.let { uriList ->
-                val dialog = ZHTools.showTaskRunningDialog((requireContext()))
-                Task.runTask {
-                    uriList.forEach { uri ->
-                        FileTools.copyFileInBackground(requireContext(), uri, binding.fileRecyclerView.fullPath.absolutePath)
-                    }
-                }.ended(TaskExecutors.getAndroidUI()) {
-                    Toast.makeText(requireContext(), getString(R.string.file_added), Toast.LENGTH_SHORT).show()
-                    binding.fileRecyclerView.refreshPath()
-                }.onThrowable { e ->
-                    Tools.showErrorRemote(e)
-                }.finallyTask(TaskExecutors.getAndroidUI()) {
-                    dialog.dismiss()
-                }.execute()
-            }
+
+        openDocumentLauncher = registerForActivityResult(
+            OpenDocumentWithExtension(null, true)
+        ) { uris: List<Uri>? ->
+            uris?.let(::importFiles)
         }
     }
 
@@ -90,307 +82,513 @@ class FilesFragment : FragmentWithAnim(R.layout.fragment_files) {
         container: ViewGroup?,
         savedInstanceState: Bundle?
     ): View {
-        binding = FragmentFilesBinding.inflate(layoutInflater)
-        mSearchViewWrapper = SearchViewWrapper(this)
+        binding = FragmentFilesBinding.inflate(inflater, container, false)
+        searchViewWrapper = SearchViewWrapper(this)
         return binding.root
     }
 
-    @SuppressLint("UseCompatLoadingForDrawables")
+    /*@SuppressLint("UseCompatLoadingForDrawables")
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         parseBundle()
         initViews()
+        setupFileRecyclerView()
+        setupButtons()
+        openInitialPath()
+        startNewbieGuide()
+    }*/
+    @SuppressLint("UseCompatLoadingForDrawables")
+    override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
+        parseBundle()
+        resolveStorageRoots()
+        initViews()
+        setupFileRecyclerView()
+        setupButtons()
+        openInitialPath()
+        startNewbieGuide()
+    }
+    private fun resolveStorageRoots() {
+        primaryStorageRoot = PathManager.getPrimaryStorageRoot(requireContext())
+        removableStorageRoot = PathManager.getRemovableStorageRoot(requireContext())
+    }
+    private fun importFiles(uriList: List<Uri>) {
+        val dialog = ZHTools.showTaskRunningDialog(requireContext())
 
-        val storageDirectory = Environment.getExternalStorageDirectory()
-
-        binding.apply {
-            fileRecyclerView.apply {
-                setShowFiles(mShowFiles)
-                setShowFolders(mShowFolders)
-                setTitleListener { title: String? -> currentPath.text = removeLockPath(title!!, mTitleRemoveLockPath) }
-
-                setFileSelectedListener(object : FileSelectedListener() {
-                    override fun onFileSelected(file: File?, path: String?) {
-                        file?.let { showDialog(it) }
-                    }
-
-                    override fun onItemLongClick(file: File?, path: String?) {
-                        file?.let { if (it.isDirectory) showDialog(it) }
-                    }
-                })
-
-                setOnMultiSelectListener { itemBeans: List<FileItemBean> ->
-                    if (itemBeans.isNotEmpty()) {
-                        Task.runTask {
-                            //取出全部文件
-                            val selectedFiles: MutableList<File> = ArrayList()
-                            itemBeans.forEach(Consumer { value: FileItemBean ->
-                                val file = value.file
-                                file?.apply { selectedFiles.add(this) }
-                            })
-                            selectedFiles
-                        }.ended(TaskExecutors.getAndroidUI()) { selectedFiles ->
-                            val filesButton = FilesButton()
-                            filesButton.setButtonVisibility(true, true, false, false, true, false)
-                            filesButton.setDialogText(
-                                getString(R.string.file_multi_select_mode_title),
-                                getString(R.string.file_multi_select_mode_message, itemBeans.size), null
-                            )
-
-                            val filesDialog = FilesDialog(
-                                requireContext(),
-                                filesButton,
-                                Task.runTask(TaskExecutors.getAndroidUI()) {
-                                    closeMultiSelect()
-                                    refreshPath()
-                                },
-                                fullPath,
-                                selectedFiles!!
-                            )
-                            filesDialog.setCopyButtonClick { operateView.pasteButton.visibility = View.VISIBLE }
-                            filesDialog.show()
-                        }.execute()
-                    }
-                }
-
-                setRefreshListener {
-                    setVisibilityAnim(nothingText, isNoFile)
-                    // 如果目录变更到了外部存储，则会检查权限
-                    if (Objects.equals(fullPath.absolutePath, storageDirectory.absolutePath)) {
-                        StoragePermissionsUtils.checkPermissions(
-                            activity = requireActivity(),
-                            title = R.string.file_external_storage,
-                            permissionGranted = null
-                        )
-                    }
-                }
-            }
-
-            currentPath.setOnClickListener {
-                EditTextDialog.Builder(requireContext())
-                    .setTitle(R.string.file_jump_to_path)
-                    .setEditText(fileRecyclerView.fullPath.absolutePath)
-                    .setAsRequired()
-                    .setConfirmListener { editBox, _ ->
-                        val path = editBox.text.toString()
-
-                        val file = File(path)
-                        //检查路径是否符合要求：最少为最顶部路径、路径是一个文件夹、这个路径存在
-                        if (!path.contains(mLockPath!!) || !file.isDirectory || !file.exists()) {
-                            editBox.error = getString(R.string.file_does_not_exist)
-                            return@setConfirmListener false
-                        }
-
-                        fileRecyclerView.listFileAt(file)
-                        true
-                    }.showDialog()
-            }
-
-            externalStorage.setOnClickListener {
-                closeMultiSelect()
-                fileRecyclerView.listFileAt(storageDirectory)
-            }
-
-            softwarePrivate.setOnClickListener {
-                closeMultiSelect()
-                fileRecyclerView.listFileAt(requireContext().getExternalFilesDir(null))
-            }
-            val adapter = fileRecyclerView.adapter
-            multiSelectFiles.setOnCheckedChangeListener { _: CompoundButton?, isChecked: Boolean ->
-                selectAll.apply {
-                    this.isChecked = false
-                    visibility = if (isChecked) View.VISIBLE else View.GONE
-                }
-                adapter.setMultiSelectMode(isChecked)
-                if (mSearchViewWrapper.isVisible()) mSearchViewWrapper.setVisibility(!isChecked)
-            }
-            selectAll.setOnCheckedChangeListener { _: CompoundButton?, isChecked: Boolean ->
-                adapter.selectAllFiles(
-                    isChecked
+        Task.runTask {
+            uriList.forEach { uri ->
+                FileTools.copyFileInBackground(
+                    requireContext(),
+                    uri,
+                    binding.fileRecyclerView.fullPath.absolutePath
                 )
             }
+        }.ended(TaskExecutors.getAndroidUI()) {
+            Toast.makeText(requireContext(), getString(R.string.file_added), Toast.LENGTH_SHORT).show()
+            binding.fileRecyclerView.refreshPath()
+        }.onThrowable { e ->
+            Tools.showErrorRemote(e)
+        }.finallyTask(TaskExecutors.getAndroidUI()) {
+            dialog.dismiss()
+        }.execute()
+    }
 
-            operateView.returnButton.setOnClickListener {
-                if (!mSelectFolderMode) {
-                    closeMultiSelect()
-                    Tools.removeCurrentFragment(requireActivity())
-                } else {
-                    EventBus.getDefault().postSticky(FileSelectorEvent(
-                        removeLockPath(fileRecyclerView.fullPath.absolutePath, mRemoveLockPath)
-                    ))
-                    Tools.removeCurrentFragment(requireActivity())
+    /*private fun setupFileRecyclerView() {
+        val storageDirectory = Environment.getExternalStorageDirectory()
+
+        binding.fileRecyclerView.apply {
+            setShowFiles(showFiles)
+            setShowFolders(showFolders)
+
+            setTitleListener { title ->
+                binding.currentPath.text = formatDisplayedPath(title.orEmpty(), titleRemoveLockPath)
+            }
+
+            setFileSelectedListener(object : FileSelectedListener() {
+                override fun onFileSelected(file: File?, path: String?) {
+                    file?.let(::showDialog)
+                }
+
+                override fun onItemLongClick(file: File?, path: String?) {
+                    file?.takeIf { it.isDirectory }?.let(::showDialog)
+                }
+            })
+
+            setOnMultiSelectListener { itemBeans ->
+                if (itemBeans.isNotEmpty()) {
+                    handleMultiSelect(itemBeans)
                 }
             }
-            operateView.addFileButton.setOnClickListener {
-                closeMultiSelect()
-                openDocumentLauncher?.launch(null)
-            } //不限制文件类型
-            operateView.createFolderButton.setOnClickListener {
-                closeMultiSelect()
-                EditTextDialog.Builder(requireContext())
-                    .setTitle(R.string.file_folder_dialog_insert_name)
-                    .setAsRequired()
-                    .setConfirmListener { editBox, _ ->
-                        val name = editBox.text.toString()
 
-                        if (name.contains("/")) {
-                            val folderNames = name.split("/")
-                            if (folderNames.any {
-                                FileTools.isFilenameInvalid(
-                                    it,
-                                    { illegalCharacters ->
-                                        editBox.error = getString(R.string.generic_input_invalid_character, illegalCharacters)
-                                    },
-                                    { invalidLength ->
-                                        editBox.error = getString(R.string.file_invalid_length, invalidLength, 255)
-                                    }
-                                )
-                            }) return@setConfirmListener false
-                        } else if (FileTools.isFilenameInvalid(editBox)) {
-                            return@setConfirmListener false
-                        }
+            setRefreshListener {
+                setVisibilityAnim(binding.nothingText, isNoFile)
 
-                        val folder = File(fileRecyclerView.fullPath, name)
-
-                        if (folder.exists()) {
-                            editBox.error = getString(R.string.file_rename_exitis)
-                            return@setConfirmListener false
-                        }
-
-                        val success = folder.mkdirs()
-                        if (success) {
-                            fileRecyclerView.listFileAt(folder)
-                        } else {
-                            fileRecyclerView.refreshPath()
-                        }
-                        true
-                    }.showDialog()
-            }
-            operateView.pasteButton.apply {
-                setOnClickListener {
-                    PasteFile.getInstance()
-                        .pasteFiles(
-                            requireActivity(),
-                            fileRecyclerView.fullPath,
-                            null,
-                            Task.runTask(TaskExecutors.getAndroidUI()) {
-                                closeMultiSelect()
-                                visibility = View.GONE
-                                fileRecyclerView.refreshPath()
-                            }
-                        )
+                // If the current directory changes to external storage,
+                // check storage permission.
+                if (fullPath.absolutePath == storageDirectory.absolutePath) {
+                    StoragePermissionsUtils.ensurePermissions(
+                        activity = requireActivity(),
+                        title = R.string.file_external_storage,
+                        permissionResult = null
+                    )
                 }
             }
-            operateView.searchButton.setOnClickListener {
-                closeMultiSelect()
-                mSearchViewWrapper.setVisibility()
-            }
-            operateView.refreshButton.setOnClickListener {
-                closeMultiSelect()
-                fileRecyclerView.refreshPath()
+        }
+    }*/
+    private fun setupFileRecyclerView() {
+        binding.fileRecyclerView.apply {
+            setShowFiles(showFiles)
+            setShowFolders(showFolders)
+
+            setTitleListener { title ->
+                binding.currentPath.text = formatDisplayedPath(title.orEmpty(), titleRemoveLockPath)
             }
 
-            fileRecyclerView.apply list@{
-                mListPath?.let {
-                    lockAndListAt(File(mLockPath!!), File(mListPath!!))
-                    return@list
+            setFileSelectedListener(object : FileSelectedListener() {
+                override fun onFileSelected(file: File?, path: String?) {
+                    file?.let(::showDialog)
                 }
-                lockAndListAt(File(mLockPath!!), File(mLockPath!!))
+
+                override fun onItemLongClick(file: File?, path: String?) {
+                    file?.takeIf { it.isDirectory }?.let(::showDialog)
+                }
+            })
+
+            setOnMultiSelectListener { itemBeans ->
+                if (itemBeans.isNotEmpty()) {
+                    handleMultiSelect(itemBeans)
+                }
+            }
+
+            setRefreshListener {
+                setVisibilityAnim(binding.nothingText, isNoFile)
+
+                val removableRoot = removableStorageRoot
+                if (removableRoot != null && PathManager.isPathInsideRoot(fullPath, removableRoot)) {
+                    StoragePermissionsUtils.ensurePermissions(
+                        activity = requireActivity(),
+                        title = R.string.file_external_storage,
+                        permissionResult = null
+                    )
+                }
+            }
+        }
+    }
+
+    private fun setupButtons() {
+
+
+        binding.currentPath.setOnClickListener {
+            EditTextDialog.Builder(requireContext())
+                .setTitle(R.string.file_jump_to_path)
+                .setEditText(binding.fileRecyclerView.fullPath.absolutePath)
+                .setAsRequired()
+                .setConfirmListener { editBox, _ ->
+                    /*val path = editBox.text.toString()
+                    val targetFile = File(path)
+                    val currentLockPath = lockPath.orEmpty()
+
+                    // The path must be inside the locked root, must exist,
+                    // and must be a directory.
+                    if (!path.contains(currentLockPath) || !targetFile.exists() || !targetFile.isDirectory) {
+                        editBox.error = getString(R.string.file_does_not_exist)
+                        return@setConfirmListener false
+                    }*/
+                    val path = editBox.text.toString().trim()
+                    val targetFile = File(path)
+                    val rootFile = File(lockPath.orEmpty())
+
+                    if (!targetFile.exists()
+                        || !targetFile.isDirectory
+                        || !PathManager.isPathInsideRoot(targetFile, rootFile)
+                    ) {
+                        editBox.error = getString(R.string.file_does_not_exist)
+                        return@setConfirmListener false
+                    }
+
+                    binding.fileRecyclerView.listFileAt(targetFile)
+                    true
+                }
+                .showDialog()
+        }
+
+        /*binding.externalStorage.setOnClickListener {
+            closeMultiSelect()
+            binding.fileRecyclerView.listFileAt(Environment.getExternalStorageDirectory())
+        }
+
+        binding.softwarePrivate.setOnClickListener {
+            closeMultiSelect()
+            binding.fileRecyclerView.listFileAt(requireContext().getExternalFilesDir(null))
+        }*/
+        binding.externalStorage.setOnClickListener {
+            closeMultiSelect()
+            binding.fileRecyclerView.listFileAt(
+                primaryStorageRoot ?: PathManager.getPrimaryStorageRoot(requireContext())
+            )
+        }
+
+        binding.softwarePrivate.setOnClickListener {
+            closeMultiSelect()
+            val target = removableStorageRoot ?: requireContext().getExternalFilesDir(null)
+            if (target != null) {
+                binding.fileRecyclerView.listFileAt(target)
+            } else {
+                Toast.makeText(requireContext(), R.string.file_does_not_exist, Toast.LENGTH_SHORT).show()
             }
         }
 
-        startNewbieGuide()
+        val adapter = binding.fileRecyclerView.adapter
+
+        binding.multiSelectFiles.setOnCheckedChangeListener { _: CompoundButton?, isChecked: Boolean ->
+            binding.selectAll.apply {
+                this.isChecked = false
+                visibility = if (isChecked) View.VISIBLE else View.GONE
+            }
+
+            adapter.setMultiSelectMode(isChecked)
+
+            if (searchViewWrapper.isVisible()) {
+                searchViewWrapper.setVisibility(!isChecked)
+            }
+        }
+
+        binding.selectAll.setOnCheckedChangeListener { _: CompoundButton?, isChecked: Boolean ->
+            adapter.selectAllFiles(isChecked)
+        }
+
+        binding.operateView.returnButton.setOnClickListener {
+            if (!selectFolderMode) {
+                closeMultiSelect()
+                Tools.removeCurrentFragment(requireActivity())
+            } else {
+                /*EventBus.getDefault().postSticky(
+                    FileSelectorEvent(
+                        formatDisplayedPath(
+                            binding.fileRecyclerView.fullPath.absolutePath,
+                            removeLockPath
+                        )
+                    )
+                )*/
+                EventBus.getDefault().postSticky(
+                    FileSelectorEvent(binding.fileRecyclerView.fullPath.absolutePath)
+                )
+                Tools.removeCurrentFragment(requireActivity())
+            }
+        }
+
+        binding.operateView.addFileButton.setOnClickListener {
+            closeMultiSelect()
+            openDocumentLauncher?.launch(null)
+        }
+
+        binding.operateView.createFolderButton.setOnClickListener {
+            closeMultiSelect()
+            showCreateFolderDialog()
+        }
+
+        binding.operateView.pasteButton.setOnClickListener {
+            PasteFile.getInstance().pasteFiles(
+                requireActivity(),
+                binding.fileRecyclerView.fullPath,
+                null,
+                Task.runTask(TaskExecutors.getAndroidUI()) {
+                    closeMultiSelect()
+                    binding.operateView.pasteButton.visibility = View.GONE
+                    binding.fileRecyclerView.refreshPath()
+                }
+            )
+        }
+
+        binding.operateView.searchButton.setOnClickListener {
+            closeMultiSelect()
+            searchViewWrapper.setVisibility()
+        }
+
+        binding.operateView.refreshButton.setOnClickListener {
+            closeMultiSelect()
+            binding.fileRecyclerView.refreshPath()
+        }
+    }
+
+    private fun handleMultiSelect(itemBeans: List<FileItemBean>) {
+        Task.runTask {
+            itemBeans.mapNotNull { it.file }
+        }.ended(TaskExecutors.getAndroidUI()) { selectedFiles ->
+            val filesButton = FilesButton().apply {
+                setButtonVisibility(true, true, false, false, true, false)
+                setDialogText(
+                    getString(R.string.file_multi_select_mode_title),
+                    getString(R.string.file_multi_select_mode_message, itemBeans.size),
+                    null
+                )
+            }
+
+            val filesDialog = FilesDialog(
+                requireContext(),
+                filesButton,
+                Task.runTask(TaskExecutors.getAndroidUI()) {
+                    closeMultiSelect()
+                    refreshPath()
+                },
+                binding.fileRecyclerView.fullPath,
+                selectedFiles ?: emptyList()
+            )
+
+            filesDialog.setCopyButtonClick {
+                binding.operateView.pasteButton.visibility = View.VISIBLE
+            }
+            filesDialog.show()
+        }.execute()
+    }
+
+    private fun showCreateFolderDialog() {
+        EditTextDialog.Builder(requireContext())
+            .setTitle(R.string.file_folder_dialog_insert_name)
+            .setAsRequired()
+            .setConfirmListener { editBox, _ ->
+                val name = editBox.text.toString()
+
+                if (name.contains("/")) {
+                    val folderNames = name.split("/")
+                    val hasInvalidName = folderNames.any { folderName ->
+                        FileTools.isFilenameInvalid(
+                            folderName,
+                            { illegalCharacters ->
+                                editBox.error = getString(
+                                    R.string.generic_input_invalid_character,
+                                    illegalCharacters
+                                )
+                            },
+                            { invalidLength ->
+                                editBox.error = getString(
+                                    R.string.file_invalid_length,
+                                    invalidLength,
+                                    255
+                                )
+                            }
+                        )
+                    }
+                    if (hasInvalidName) return@setConfirmListener false
+                } else if (FileTools.isFilenameInvalid(editBox)) {
+                    return@setConfirmListener false
+                }
+
+                val folder = File(binding.fileRecyclerView.fullPath, name)
+                if (folder.exists()) {
+                    editBox.error = getString(R.string.file_rename_exitis)
+                    return@setConfirmListener false
+                }
+
+                val success = folder.mkdirs()
+                if (success) {
+                    binding.fileRecyclerView.listFileAt(folder)
+                } else {
+                    binding.fileRecyclerView.refreshPath()
+                }
+
+                true
+            }
+            .showDialog()
+    }
+
+    private fun openInitialPath() {
+        val currentLockPath = File(lockPath.orEmpty())
+
+        binding.fileRecyclerView.apply {
+            listPath?.let {
+                lockAndListAt(currentLockPath, File(it))
+                return
+            }
+            lockAndListAt(currentLockPath, currentLockPath)
+        }
     }
 
     private fun startNewbieGuide() {
-        if (NewbieGuideUtils.showOnlyOne("${TAG}${if (mSelectFolderMode) "_select" else ""}")) return
+        if (NewbieGuideUtils.showOnlyOne("${TAG}${if (selectFolderMode) "_select" else ""}")) {
+            return
+        }
+
         binding.operateView.apply {
-            val fragmentActivity = requireActivity()
-            val refresh = NewbieGuideUtils.getSimpleTarget(fragmentActivity, refreshButton, getString(R.string.generic_refresh), getString(R.string.newbie_guide_general_refresh))
-            val search = NewbieGuideUtils.getSimpleTarget(fragmentActivity, searchButton, getString(R.string.generic_search), getString(R.string.newbie_guide_file_search))
-            val createFolder = NewbieGuideUtils.getSimpleTarget(fragmentActivity, createFolderButton, getString(R.string.file_create_folder), getString(R.string.newbie_guide_file_create_folder))
-            if (mSelectFolderMode) {
-                TapTargetSequence(fragmentActivity)
-                    .targets(refresh, search, createFolder,
-                        NewbieGuideUtils.getSimpleTarget(fragmentActivity, returnButton, getString(R.string.file_select_folder), getString(R.string.newbie_guide_file_select)))
+            val activity = requireActivity()
+            val refreshTarget = NewbieGuideUtils.getSimpleTarget(
+                activity,
+                refreshButton,
+                getString(R.string.generic_refresh),
+                getString(R.string.newbie_guide_general_refresh)
+            )
+            val searchTarget = NewbieGuideUtils.getSimpleTarget(
+                activity,
+                searchButton,
+                getString(R.string.generic_search),
+                getString(R.string.newbie_guide_file_search)
+            )
+            val createFolderTarget = NewbieGuideUtils.getSimpleTarget(
+                activity,
+                createFolderButton,
+                getString(R.string.file_create_folder),
+                getString(R.string.newbie_guide_file_create_folder)
+            )
+
+            if (selectFolderMode) {
+                TapTargetSequence(activity)
+                    .targets(
+                        refreshTarget,
+                        searchTarget,
+                        createFolderTarget,
+                        NewbieGuideUtils.getSimpleTarget(
+                            activity,
+                            returnButton,
+                            getString(R.string.file_select_folder),
+                            getString(R.string.newbie_guide_file_select)
+                        )
+                    )
                     .start()
             } else {
-                TapTargetSequence(fragmentActivity)
-                    .targets(refresh, search,
-                        NewbieGuideUtils.getSimpleTarget(fragmentActivity, addFileButton, getString(R.string.file_add_file), getString(R.string.newbie_guide_file_import)),
-                        createFolder,
-                        NewbieGuideUtils.getSimpleTarget(fragmentActivity, returnButton, getString(R.string.generic_close), getString(R.string.newbie_guide_general_close)))
+                TapTargetSequence(activity)
+                    .targets(
+                        refreshTarget,
+                        searchTarget,
+                        NewbieGuideUtils.getSimpleTarget(
+                            activity,
+                            addFileButton,
+                            getString(R.string.file_add_file),
+                            getString(R.string.newbie_guide_file_import)
+                        ),
+                        createFolderTarget,
+                        NewbieGuideUtils.getSimpleTarget(
+                            activity,
+                            returnButton,
+                            getString(R.string.generic_close),
+                            getString(R.string.newbie_guide_general_close)
+                        )
+                    )
                     .start()
             }
         }
     }
 
     private fun closeMultiSelect() {
-        //点击其它控件时关闭多选模式
+        // Disable multi-select mode when other controls are used.
         binding.multiSelectFiles.isChecked = false
         binding.selectAll.visibility = View.GONE
     }
 
     private fun showDialog(file: File) {
-        val filesButton = FilesButton()
-        filesButton.setButtonVisibility(true, true, true, true, true, false)
-        val message = if (file.isDirectory) {
-            getString(R.string.file_folder_message)
-        } else {
-            getString(R.string.file_message)
+        val filesButton = FilesButton().apply {
+            setButtonVisibility(true, true, true, true, true, false)
+            setMessageText(
+                if (file.isDirectory) {
+                    getString(R.string.file_folder_message)
+                } else {
+                    getString(R.string.file_message)
+                }
+            )
         }
-        filesButton.setMessageText(message)
 
-        val filesDialog = FilesDialog(requireContext(), filesButton,
+        val filesDialog = FilesDialog(
+            requireContext(),
+            filesButton,
             Task.runTask(TaskExecutors.getAndroidUI()) {
                 binding.fileRecyclerView.refreshPath()
             },
-            binding.fileRecyclerView.fullPath, file)
-        filesDialog.setCopyButtonClick { binding.operateView.pasteButton.visibility = View.VISIBLE }
+            binding.fileRecyclerView.fullPath,
+            file
+        )
+
+        filesDialog.setCopyButtonClick {
+            binding.operateView.pasteButton.visibility = View.VISIBLE
+        }
         filesDialog.show()
     }
 
-    private fun removeLockPath(path: String, remove: Boolean): String {
-        var string = path
-        if (remove) {
-            string = path.replace(mLockPath!!, ".")
+    private fun formatDisplayedPath(path: String, removeLockedRoot: Boolean): String {
+        if (!removeLockedRoot) {
+            return path
         }
-        return string
+
+        return path.replace(lockPath.orEmpty(), ".")
     }
 
     @SuppressLint("UseCompatLoadingForDrawables")
     private fun initViews() {
         binding.apply {
-            mSearchViewWrapper.setSearchListener(object : SearchViewWrapper.SearchListener {
+            searchViewWrapper.setSearchListener(object : SearchViewWrapper.SearchListener {
                 override fun onSearch(string: String?, caseSensitive: Boolean): Int {
                     return fileRecyclerView.searchFiles(string, caseSensitive)
                 }
             })
-            mSearchViewWrapper.setShowSearchResultsListener(object : SearchViewWrapper.ShowSearchResultsListener {
+
+            searchViewWrapper.setShowSearchResultsListener(object :
+                SearchViewWrapper.ShowSearchResultsListener {
                 override fun onSearch(show: Boolean) {
                     fileRecyclerView.setShowSearchResultsOnly(show)
                 }
             })
 
-            if (!mQuickAccessPaths) {
+            if (!quickAccessPaths) {
                 externalStorage.visibility = View.GONE
                 softwarePrivate.visibility = View.GONE
             }
-            if (mSelectFolderMode || !mMultiSelectMode) {
+
+            if (selectFolderMode || !multiSelectMode) {
                 multiSelectFiles.visibility = View.GONE
                 selectAll.visibility = View.GONE
             }
 
-            if (mSelectFolderMode) {
+            if (selectFolderMode) {
                 operateView.addFileButton.visibility = View.GONE
                 operateView.returnButton.apply {
                     contentDescription = getString(R.string.file_select_folder)
                     setImageDrawable(resources.getDrawable(R.drawable.ic_check, requireActivity().theme))
                 }
             }
+            if (removableStorageRoot != null) {
+                softwarePrivate.contentDescription = "SD card"
+            }
         }
 
         binding.operateView.apply {
-            pasteButton.setVisibility(if (PasteFile.getInstance().pasteType != null) View.VISIBLE else View.GONE)
+            pasteButton.visibility =
+                if (PasteFile.getInstance().pasteType != null) View.VISIBLE else View.GONE
 
             ZHTools.setTooltipText(
                 returnButton,
@@ -398,21 +596,34 @@ class FilesFragment : FragmentWithAnim(R.layout.fragment_files) {
                 createFolderButton,
                 pasteButton,
                 searchButton,
-                refreshButton)
+                refreshButton
+            )
         }
+    }
+
+    private fun refreshPath() {
+        binding.fileRecyclerView.refreshPath()
     }
 
     private fun parseBundle() {
         val bundle = arguments ?: return
-        mLockPath = bundle.getString(BUNDLE_LOCK_PATH, Environment.getExternalStorageDirectory().absolutePath)
-        mListPath = bundle.getString(BUNDLE_LIST_PATH, null)
-        mShowFiles = bundle.getBoolean(BUNDLE_SHOW_FILE, true)
-        mShowFolders = bundle.getBoolean(BUNDLE_SHOW_FOLDER, true)
-        mQuickAccessPaths = bundle.getBoolean(BUNDLE_QUICK_ACCESS_PATHS, true)
-        mMultiSelectMode = bundle.getBoolean(BUNDLE_MULTI_SELECT_MODE, true)
-        mSelectFolderMode = bundle.getBoolean(BUNDLE_SELECT_FOLDER_MODE, false)
-        mRemoveLockPath = bundle.getBoolean(BUNDLE_REMOVE_LOCK_PATH, true)
-        mTitleRemoveLockPath = bundle.getBoolean(BUNDLE_TITLE_REMOVE_LOCK_PATH, true)
+
+        /*lockPath = bundle.getString(
+            BUNDLE_LOCK_PATH,
+            Environment.getExternalStorageDirectory().absolutePath
+        )*/
+        lockPath = bundle.getString(
+            BUNDLE_LOCK_PATH,
+            PathManager.getPrimaryStorageRoot(requireContext()).absolutePath
+        )
+        listPath = bundle.getString(BUNDLE_LIST_PATH, null)
+        showFiles = bundle.getBoolean(BUNDLE_SHOW_FILE, true)
+        showFolders = bundle.getBoolean(BUNDLE_SHOW_FOLDER, true)
+        quickAccessPaths = bundle.getBoolean(BUNDLE_QUICK_ACCESS_PATHS, true)
+        multiSelectMode = bundle.getBoolean(BUNDLE_MULTI_SELECT_MODE, true)
+        selectFolderMode = bundle.getBoolean(BUNDLE_SELECT_FOLDER_MODE, false)
+        removeLockPath = bundle.getBoolean(BUNDLE_REMOVE_LOCK_PATH, true)
+        titleRemoveLockPath = bundle.getBoolean(BUNDLE_TITLE_REMOVE_LOCK_PATH, true)
     }
 
     override fun slideIn(animPlayer: AnimPlayer) {
@@ -429,4 +640,3 @@ class FilesFragment : FragmentWithAnim(R.layout.fragment_files) {
         }
     }
 }
-

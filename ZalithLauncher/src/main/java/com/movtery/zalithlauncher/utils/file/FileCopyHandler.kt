@@ -9,105 +9,144 @@ import java.io.File
 import java.util.concurrent.atomic.AtomicLong
 
 class FileCopyHandler(
-    mContext: Context,
-    private val mPasteType: PasteFile.PasteType,
-    private val mSelectedFiles: List<File>,
-    private val mRoot: File,
-    private val mTarget: File,
-    private val mFileExtensionGetter: FileExtensionGetter?,
+    context: Context,
+    private val pasteType: PasteFile.PasteType,
+    private val selectedFiles: List<File>,
+    private val root: File,
+    private val target: File,
+    private val fileExtensionGetter: FileExtensionGetter?,
     private val endTask: Task<*>
-) : FileHandler(mContext), FileSearchProgress {
+) : FileHandler(context), FileSearchProgress {
+
     private val foundFiles = mutableMapOf<File, File>()
     private val totalFileSize = AtomicLong(0)
-    private val fileSize = AtomicLong(0)
-    private val fileCount = AtomicLong(0)
+    private val pendingFileSize = AtomicLong(0)
+    private val pendingFileCount = AtomicLong(0)
 
     fun start() {
         super.start(this)
     }
 
     private fun addFile(file: File) {
-        fileCount.incrementAndGet()
-        fileSize.addAndGet(FileUtils.sizeOf(file))
-        //当前文件 - 目标文件
-        foundFiles [file] = getNewDestination(file, getTargetFile(file), mFileExtensionGetter?.onGet(file))
+        pendingFileCount.incrementAndGet()
+        pendingFileSize.addAndGet(FileUtils.sizeOf(file))
+
+        val targetDir = getTargetDirectory(file)
+        val extension = fileExtensionGetter?.onGet(file)
+
+        foundFiles[file] = getAvailableDestination(file, targetDir, extension)
     }
 
     private fun addDirectory(directory: File) {
         if (directory.isFile) {
             addFile(directory)
-        } else {
-            directory.listFiles()?.let { files ->
-                if (files.isEmpty()) {
-                    addFile(directory)
-                } else {
-                    files.forEach { file ->
-                        if (file.isFile) addFile(file)
-                        else if (file.isDirectory) addDirectory(file)
-                    }
-                }
+            return
+        }
+
+        val files = directory.listFiles() ?: return
+
+        if (files.isEmpty()) {
+            addFile(directory)
+            return
+        }
+
+        files.forEach { file ->
+            when {
+                file.isFile -> addFile(file)
+                file.isDirectory -> addDirectory(file)
             }
         }
     }
 
-    private fun getTargetFile(file: File): File {
-        return File(file.absolutePath.replace(mRoot.absolutePath, mTarget.absolutePath).removeSuffix(file.name))
+    private fun getTargetDirectory(file: File): File {
+        return File(
+            file.absolutePath
+                .replace(root.absolutePath, target.absolutePath)
+                .removeSuffix(file.name)
+        )
     }
 
-    //如果目标地点已存在同名文件，就将目标文件的文件名加上数字标识，防止文件被覆盖
-    private fun getNewDestination(sourceFile: File, targetDir: File, fileExtension: String?): File {
-        var extension: String? = fileExtension
-        var destFile = File(targetDir, sourceFile.name)
-        if (destFile.exists()) {
-            val fileNameWithoutExt = getFileNameWithoutExtension(sourceFile.name, extension)
-            extension ?: run {
-                val dotIndex = sourceFile.name.lastIndexOf('.')
-                extension = if (dotIndex == -1) "" else sourceFile.name.substring(dotIndex)
-            }
-            var proposedFileName: String
-            var counter = 1
-            while (destFile.exists()) {
-                proposedFileName = "$fileNameWithoutExt ($counter)$extension"
-                destFile = File(targetDir, proposedFileName)
-                counter++
-            }
+    /**
+     * If a file with the same name already exists in the target location,
+     * append a numeric suffix to the file name to prevent overwriting.
+     */
+    private fun getAvailableDestination(sourceFile: File, targetDir: File, fileExtension: String?): File {
+        var extension = fileExtension
+        var destinationFile = File(targetDir, sourceFile.name)
+
+        if (!destinationFile.exists()) {
+            return destinationFile
         }
-        return destFile
+
+        val fileNameWithoutExt = getFileNameWithoutExtension(sourceFile.name, extension)
+
+        if (extension == null) {
+            val dotIndex = sourceFile.name.lastIndexOf('.')
+            extension = if (dotIndex == -1) "" else sourceFile.name.substring(dotIndex)
+        }
+
+        var counter = 1
+        while (destinationFile.exists()) {
+            val proposedFileName = "$fileNameWithoutExt ($counter)$extension"
+            destinationFile = File(targetDir, proposedFileName)
+            counter++
+        }
+
+        return destinationFile
     }
 
     override fun searchFilesToProcess() {
-        mSelectedFiles.forEach {
-            currentTask?.let { task -> if (task.isCancelled) return@forEach }
+        selectedFiles.forEach { file ->
+            currentTask?.let { task ->
+                if (task.isCancelled) return@forEach
+            }
 
-            if (it.isFile) addFile(it)
-            else if (it.isDirectory) addDirectory(it)
+            when {
+                file.isFile -> addFile(file)
+                file.isDirectory -> addDirectory(file)
+            }
         }
-        currentTask?.let { task -> if (task.isCancelled) return }
-        totalFileSize.set(fileSize.get())
+
+        currentTask?.let { task ->
+            if (task.isCancelled) return
+        }
+
+        totalFileSize.set(pendingFileSize.get())
     }
 
     override fun processFile() {
-        Logging.i("FileCopyHandler", "Copy files (total files: $fileCount, to ${mTarget.absolutePath})")
-        foundFiles.entries.parallelStream().forEach { (currentFile, targetFile) ->
-            currentTask?.let { task -> if (task.isCancelled) return@forEach }
+        Logging.i("FileCopyHandler", "Copy files (total files: $pendingFileCount, to ${target.absolutePath})")
 
-            fileSize.addAndGet(-FileUtils.sizeOf(currentFile))
-            fileCount.decrementAndGet()
+        foundFiles.entries.parallelStream().forEach { (currentFile, targetFile) ->
+            currentTask?.let { task ->
+                if (task.isCancelled) return@forEach
+            }
+
+            pendingFileSize.addAndGet(-FileUtils.sizeOf(currentFile))
+            pendingFileCount.decrementAndGet()
+
             targetFile.parentFile?.takeIf { !it.exists() }?.mkdirs()
-            when (mPasteType) {
+
+            when (pasteType) {
                 PasteFile.PasteType.COPY -> FileTools.copyFile(currentFile, targetFile)
-                else -> FileTools.moveFile(currentFile, targetFile)
+                PasteFile.PasteType.MOVE -> FileTools.moveFile(currentFile, targetFile)
             }
         }
-        currentTask?.let { task -> if (task.isCancelled) return }
-        if (mPasteType == PasteFile.PasteType.MOVE) mSelectedFiles.forEach { FileUtils.deleteQuietly(it) }
+
+        currentTask?.let { task ->
+            if (task.isCancelled) return
+        }
+
+        if (pasteType == PasteFile.PasteType.MOVE) {
+            selectedFiles.forEach { FileUtils.deleteQuietly(it) }
+        }
     }
 
-    override fun getCurrentFileCount() = fileCount.get()
+    override fun getCurrentFileCount(): Long = pendingFileCount.get()
 
-    override fun getTotalSize() = totalFileSize.get()
+    override fun getTotalSize(): Long = totalFileSize.get()
 
-    override fun getPendingSize() = fileSize.get()
+    override fun getPendingSize(): Long = pendingFileSize.get()
 
     override fun onEnd() {
         endTask.execute()

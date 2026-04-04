@@ -18,94 +18,123 @@ import com.movtery.zalithlauncher.ui.dialog.TipDialog
 
 class StoragePermissionsUtils {
     companion object {
-        private const val REQUEST_CODE_PERMISSIONS: Int = 0
-        @JvmStatic
-        private var hasStoragePermission: Boolean = false
+        private const val REQUEST_CODE_STORAGE_PERMISSIONS = 1001
+
+        @Volatile
+        private var cachedHasStoragePermission: Boolean = false
 
         /**
-         * 检查存储权限，返回是否拥有存储权限
+         * Checks storage permission and updates the cached result.
          */
         @JvmStatic
-        fun checkPermissions(context: Context) {
-            hasStoragePermission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                checkPermissionsForAndroid11AndAbove()
+        fun refreshPermissions(context: Context) {
+            cachedHasStoragePermission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                hasManageAllFilesPermission()
             } else {
-                hasStoragePermissions(context)
+                hasLegacyStoragePermissions(context)
             }
         }
 
         /**
-         * 获得提前检查好的存储权限
+         * Returns the last cached storage permission state.
+         *
+         * Call [refreshPermissions] first if you need the latest value.
          */
         @JvmStatic
-        fun checkPermissions() = hasStoragePermission
+        fun hasCachedPermission(): Boolean = cachedHasStoragePermission
 
         /**
-         * 检查存储权限，如果没有存储权限，则弹出弹窗向用户申请
+         * Checks storage permission and, if missing, shows a dialog to request it.
          */
         @JvmStatic
-        fun checkPermissions(
+        fun ensurePermissions(
             activity: Activity,
             title: Int = R.string.generic_warning,
             message: String = getDefaultPermissionMessage(activity),
-            permissionGranted: PermissionGranted?
+            permissionResult: PermissionResult?
         ) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                handlePermissionsForAndroid11AndAbove(activity, title, message, permissionGranted)
+                handleAndroid11AndAbove(activity, title, message, permissionResult)
             } else {
-                handlePermissionsForAndroid10AndBelow(activity, title, message, permissionGranted)
+                handleAndroid10AndBelow(activity, title, message, permissionResult)
             }
         }
 
         /**
-         * 适用于安卓10及一下的存储权限检查
+         * Returns whether legacy external storage permissions are granted.
+         *
+         * Used for Android 10 and below.
          */
-        fun hasStoragePermissions(context: Context): Boolean {
-            return ActivityCompat.checkSelfPermission(context, Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED &&
-                    ContextCompat.checkSelfPermission(context, Manifest.permission.WRITE_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
+        @JvmStatic
+        fun hasLegacyStoragePermissions(context: Context): Boolean {
+            return ActivityCompat.checkSelfPermission(
+                context,
+                Manifest.permission.READ_EXTERNAL_STORAGE
+            ) == PackageManager.PERMISSION_GRANTED &&
+                    ContextCompat.checkSelfPermission(
+                        context,
+                        Manifest.permission.WRITE_EXTERNAL_STORAGE
+                    ) == PackageManager.PERMISSION_GRANTED
         }
 
-        @RequiresApi(api = Build.VERSION_CODES.R)
-        private fun checkPermissionsForAndroid11AndAbove() = Environment.isExternalStorageManager()
+        @JvmStatic
+        @RequiresApi(Build.VERSION_CODES.R)
+        fun hasManageAllFilesPermission(): Boolean {
+            return Environment.isExternalStorageManager()
+        }
 
-        @RequiresApi(api = Build.VERSION_CODES.R)
-        private fun handlePermissionsForAndroid11AndAbove(activity: Activity, title: Int, message: String, permissionGranted: PermissionGranted?) {
-            if (!checkPermissionsForAndroid11AndAbove()) {
-                showPermissionRequestDialog(activity, title, message, object : RequestPermissions {
+        @RequiresApi(Build.VERSION_CODES.R)
+        private fun handleAndroid11AndAbove(
+            activity: Activity,
+            title: Int,
+            message: String,
+            permissionResult: PermissionResult?
+        ) {
+            if (!hasManageAllFilesPermission()) {
+                showPermissionRequestDialog(activity, title, message, object : PermissionRequestAction {
                     override fun onRequest() {
-                        val intent =
-                            Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION)
-                        intent.setData(Uri.parse("package:" + activity.packageName))
-                        activity.startActivityForResult(intent, REQUEST_CODE_PERMISSIONS)
+                        val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {
+                            data = Uri.parse("package:${activity.packageName}")
+                        }
+                        activity.startActivityForResult(intent, REQUEST_CODE_STORAGE_PERMISSIONS)
                     }
 
                     override fun onCancel() {
-                        permissionGranted?.cancelled()
+                        permissionResult?.onCancelled()
                     }
                 })
             } else {
-                permissionGranted?.granted()
+                cachedHasStoragePermission = true
+                permissionResult?.onGranted()
             }
         }
 
-        private fun handlePermissionsForAndroid10AndBelow(activity: Activity, title: Int, message: String, permissionGranted: PermissionGranted?) {
-            if (!hasStoragePermissions(activity)) {
-                showPermissionRequestDialog(activity, title, message, object : RequestPermissions {
+        private fun handleAndroid10AndBelow(
+            activity: Activity,
+            title: Int,
+            message: String,
+            permissionResult: PermissionResult?
+        ) {
+            if (!hasLegacyStoragePermissions(activity)) {
+                showPermissionRequestDialog(activity, title, message, object : PermissionRequestAction {
                     override fun onRequest() {
                         ActivityCompat.requestPermissions(
-                            activity, arrayOf(
+                            activity,
+                            arrayOf(
                                 Manifest.permission.READ_EXTERNAL_STORAGE,
                                 Manifest.permission.WRITE_EXTERNAL_STORAGE
-                            ), REQUEST_CODE_PERMISSIONS
+                            ),
+                            REQUEST_CODE_STORAGE_PERMISSIONS
                         )
                     }
 
                     override fun onCancel() {
-                        permissionGranted?.cancelled()
+                        permissionResult?.onCancelled()
                     }
                 })
             } else {
-                permissionGranted?.granted()
+                cachedHasStoragePermission = true
+                permissionResult?.onGranted()
             }
         }
 
@@ -113,28 +142,29 @@ class StoragePermissionsUtils {
             context: Context,
             title: Int,
             message: String,
-            requestPermissions: RequestPermissions
+            requestAction: PermissionRequestAction
         ) {
             TipDialog.Builder(context)
                 .setTitle(title)
                 .setMessage(message)
-                .setConfirmClickListener { requestPermissions.onRequest() }
-                .setCancelClickListener { requestPermissions.onCancel() }
+                .setConfirmClickListener { requestAction.onRequest() }
+                .setCancelClickListener { requestAction.onCancel() }
                 .setCancelable(false)
                 .showDialog()
         }
 
-        private fun getDefaultPermissionMessage(context: Context) =
-            InfoCenter.replaceName(context, R.string.permissions_manage_external_storage)
+        private fun getDefaultPermissionMessage(context: Context): String {
+            return InfoCenter.replaceName(context, R.string.permissions_manage_external_storage)
+        }
     }
 
-    private interface RequestPermissions {
+    private interface PermissionRequestAction {
         fun onRequest()
         fun onCancel()
     }
 
-    interface PermissionGranted {
-        fun granted()
-        fun cancelled()
+    interface PermissionResult {
+        fun onGranted()
+        fun onCancelled()
     }
 }
