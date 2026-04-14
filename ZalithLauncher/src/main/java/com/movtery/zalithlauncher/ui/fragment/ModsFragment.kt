@@ -9,6 +9,7 @@ import android.view.ViewGroup
 import android.widget.CompoundButton
 import android.widget.Toast
 import androidx.activity.result.ActivityResultLauncher
+import androidx.appcompat.app.AlertDialog
 import androidx.core.content.ContextCompat
 import com.getkeepsafe.taptargetview.TapTargetSequence
 import com.movtery.anim.AnimPlayer
@@ -214,6 +215,7 @@ class ModsFragment : FragmentWithAnim(R.layout.fragment_mods) {
 
             goDownloadText.setOnClickListener { goDownloadMod() }
             checkUpdatesModrinthButton.setOnClickListener { runModrinthUpdateCheck() }
+            modrinthUpdateInfoButton.setOnClickListener { showModrinthUpdateInfoDialog() }
             checkUpdatesCurseforgeButton.setOnClickListener { runCurseForgeUpdateCheck() }
 
             fileRecyclerView.lockAndListAt(File(mRootPath), File(mRootPath))
@@ -221,6 +223,24 @@ class ModsFragment : FragmentWithAnim(R.layout.fragment_mods) {
 
         startNewbieGuide()
     }
+
+    private fun showModrinthUpdateInfoDialog() {
+        AlertDialog.Builder(requireContext())
+            .setTitle("About Modrinth update checking")
+            .setMessage(
+                "These button checks your installed mods against Modrinth or Curseforge.\n\n" +
+                        "If some of your mods were installed from CurseForge and others from Modrinth, " +
+                        "the results may not always be accurate. In mixed modpacks, some mods may show " +
+                        "as outdated or unknown because the updater is checking against the selected platform.\n\n" +
+                        "For best results:\n" +
+                        "• Use the Modrinth button for mods installed from Modrinth\n" +
+                        "• Use the CurseForge button for mods installed from CurseForge\n" +
+                        "• Imported mods may sometimes show as unknown"
+            )
+            .setPositiveButton(android.R.string.ok, null)
+            .show()
+    }
+
     private fun hasAnyVisibleUpdates(): Boolean {
         return mUpdateResults.values.any { it.status == UpdateUiStatus.UPDATE_AVAILABLE }
     }

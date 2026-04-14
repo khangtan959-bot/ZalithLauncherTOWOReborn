@@ -37,12 +37,6 @@ object CurseForgeUpdateChecker {
         val reason: String?
     )
 
-    private data class ProjectMatch(
-        val project: JsonObject,
-        val score: Int,
-        val query: String
-    )
-
     private data class CandidateProject(
         val project: JsonObject,
         var searchScore: Int,
@@ -277,7 +271,7 @@ object CurseForgeUpdateChecker {
                 matchedFile = fileMatch?.file
             )
 
-            if (best == null || compareVerifiedMatches(verified, best!!) > 0) {
+            if (best == null || compareVerifiedMatches(verified, best) > 0) {
                 best = verified
             }
         }
@@ -411,7 +405,7 @@ object CurseForgeUpdateChecker {
                 strictLoaders = strictLoaders,
                 minecraftVersion = minecraftVersion
             )
-            if (score > 0 && (best == null || score > best!!.score)) {
+            if (score > 0 && (best == null || score > best.score)) {
                 best = CandidateFileMatch(candidate, score)
             }
         }
@@ -778,7 +772,7 @@ object CurseForgeUpdateChecker {
         for (indexElement in latestFilesIndexes) {
             val indexObject = indexElement.asJsonObject
             val rawLoader = GsonJsonUtils.getStringSafe(indexObject, "modLoader") ?: continue
-            ModLoader.values().firstOrNull { loader -> loader != ModLoader.ALL && rawLoader == loader.curseforgeId }
+            ModLoader.entries.firstOrNull { loader -> loader != ModLoader.ALL && rawLoader == loader.curseforgeId }
                 ?.let { projectLoaders.add(it) }
         }
 
@@ -791,7 +785,7 @@ object CurseForgeUpdateChecker {
         val gameVersions = GsonJsonUtils.getJsonArraySafe(file, "gameVersions") ?: return emptySet()
         gameVersions.forEach { element ->
             val value = element.asString
-            ModLoader.values().firstOrNull { loader ->
+            ModLoader.entries.firstOrNull { loader ->
                 loader != ModLoader.ALL && value.equals(loader.loaderName, ignoreCase = true)
             }?.let { detectedLoaders.add(it) }
         }
@@ -831,7 +825,7 @@ object CurseForgeUpdateChecker {
 
     private fun String.stripVersionTokens(): String {
         return this
-            .replace(Regex("(?i)\\[[^\\]]*]"), " ")
+            .replace(Regex("(?i)\\[[^]]*]"), " ")
             .replace(Regex("(?i)\\+mc\\d+(\\.\\d+)+"), " ")
             .replace(Regex("(?i)\\bmc\\d+(\\.\\d+)+\\b"), " ")
             .replace(Regex("(?i)[-_ ]v?\\d+(\\.\\d+)+([+._-][a-z0-9]+)*"), " ")

@@ -3,7 +3,6 @@ package com.movtery.zalithlauncher.feature.mod
 import android.content.Context
 import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
-import com.movtery.zalithlauncher.feature.download.enums.ModLoader
 import com.movtery.zalithlauncher.feature.download.item.InfoItem
 import com.movtery.zalithlauncher.feature.download.item.ModVersionItem
 import com.movtery.zalithlauncher.feature.log.Logging
@@ -79,26 +78,6 @@ object CurseForgeInstalledIndex {
         }.onFailure {
             Logging.e("CurseForgeInstalledIndex", "Failed to read installed CurseForge metadata", it)
         }.getOrNull()
-    }
-
-    @Synchronized
-    fun removeForFile(context: Context, file: File) {
-        runCatching {
-            val entries = loadEntries(context).toMutableList()
-            val normalizedFileName = normalizeFileName(file.name)
-            val sha1 = computeSha1OrNull(file)?.lowercase(Locale.ROOT)
-
-            val changed = entries.removeAll { entry ->
-                entry.normalizedFileName == normalizedFileName ||
-                        (!sha1.isNullOrBlank() && entry.sha1 == sha1)
-            }
-
-            if (changed) {
-                writeEntries(context, entries)
-            }
-        }.onFailure {
-            Logging.e("CurseForgeInstalledIndex", "Failed to remove installed CurseForge metadata", it)
-        }
     }
 
     private fun getIndexFile(context: Context): File {
