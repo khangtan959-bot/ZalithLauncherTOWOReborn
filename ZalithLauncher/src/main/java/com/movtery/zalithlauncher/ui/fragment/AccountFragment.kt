@@ -174,32 +174,7 @@ class AccountFragment : FragmentWithAnim(R.layout.fragment_account), View.OnClic
             accountsRecycler.adapter = accountAdapter
 
             accountTypeTab.observeIndexChange { _, toIndex, _, fromUser ->
-                fun handleNonMicrosoftLogin(message: Int, login: () -> Unit) {
-                    checkUsageAllowed(object : CheckResultListener {
-                        override fun onUsageAllowed() {
-                            login()
-                        }
-
-                        override fun onUsageDenied() {
-                            if (!AllSettings.localAccountReminders.getValue()) {
-                                login()
-                            } else {
-                                openDialog(
-                                    context,
-                                    TipDialog.OnConfirmClickListener { checked ->
-                                        LocalAccountUtils.saveReminders(checked)
-                                        login()
-                                    },
-                                    getString(message) + getString(R.string.account_purchase_minecraft_account_tip),
-                                    R.string.account_no_microsoft_account_continue
-                                )
-                            }
-                        }
-                    })
-                }
-
                 // We only want to respond to direct user taps.
-                // Otherwise, it may keep opening the Microsoft login screen repeatedly.
                 if (fromUser) {
                     when (toIndex) {
                         // Microsoft account
@@ -210,19 +185,15 @@ class AccountFragment : FragmentWithAnim(R.layout.fragment_account), View.OnClic
                             null
                         )
 
-                        // Offline account
+                        // Offline account - FIXED: Không kiểm tra bản quyền, gọi thẳng hàm tạo
                         1 -> {
-                            handleNonMicrosoftLogin(R.string.account_no_microsoft_account_local) {
-                                localLogin()
-                            }
+                            localLogin()
                         }
 
-                        // External / third-party account
+                        // External / third-party account - FIXED: Không kiểm tra bản quyền, gọi thẳng hàm tạo
                         else -> {
-                            handleNonMicrosoftLogin(R.string.account_no_microsoft_account_other) {
-                                // Server index starts from 0.
-                                otherLogin(toIndex - 2)
-                            }
+                            // Server index starts from 0.
+                            otherLogin(toIndex - 2)
                         }
                     }
                 }
