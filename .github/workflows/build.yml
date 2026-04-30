@@ -1,0 +1,31 @@
+name: Build Launcher APK
+
+on:
+  workflow_dispatch: # Lệnh này cho phép bạn bấm nút Build thủ công
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Setup Java JDK
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17' # Cấu hình Java chuẩn để build PojavLauncher
+          distribution: 'temurin'
+          cache: gradle
+
+      - name: Cấp quyền chạy cho Gradle
+        run: chmod +x gradlew
+
+      - name: Bắt đầu Build APK
+        run: ./gradlew assembleDebug --stacktrace
+
+      - name: Xuất file APK ra để tải về
+        uses: actions/upload-artifact@v4
+        with:
+          name: ZalithLauncher-Bypass-APK
+          path: '**/*.apk' # Tự động quét và lấy tất cả file .apk được tạo ra
