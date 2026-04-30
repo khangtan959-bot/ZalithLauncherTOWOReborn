@@ -2,7 +2,6 @@ package net.kdt.pojavlaunch;
 
 import static com.movtery.zalithlauncher.launch.LaunchGame.preLaunch;
 import static net.kdt.pojavlaunch.Tools.currentDisplayMetrics;
-
 import android.Manifest;
 import android.app.NotificationManager;
 import android.content.Context;
@@ -667,32 +666,9 @@ public class LauncherActivity extends BaseActivity {
         }).init();
     }
 
+    // FIXED: Không kiểm tra bản quyền (checkUsageAllowed) nữa, gọi thẳng lệnh start game.
     private void launchGame(Version version) {
-        LocalAccountUtils.checkUsageAllowed(new LocalAccountUtils.CheckResultListener() {
-            @Override
-            public void onUsageAllowed() {
-                continueLaunchIfModernRendererReady(version);
-            }
-
-            @Override
-            public void onUsageDenied() {
-                if (!AllSettings.getLocalAccountReminders().getValue()) {
-                    continueLaunchIfModernRendererReady(version);
-                    return;
-                }
-
-                LocalAccountUtils.openDialog(
-                        LauncherActivity.this,
-                        checked -> {
-                            LocalAccountUtils.saveReminders(checked);
-                            continueLaunchIfModernRendererReady(version);
-                        },
-                        getString(R.string.account_no_microsoft_account)
-                                + getString(R.string.account_purchase_minecraft_account_tip),
-                        R.string.account_continue_to_launch_the_game
-                );
-            }
-        });
+        continueLaunchIfModernRendererReady(version);
     }
 
     private void continueLaunchIfModernRendererReady(Version version) {
@@ -740,7 +716,7 @@ public class LauncherActivity extends BaseActivity {
             Boolean parsed = parseIsVersionAtLeast17(candidate);
             if (parsed != null) {
                 Logger.appendToLog(
-                        "Modern renderer gate [LauncherActivity]: parsed version candidate '"
+                        "Modern renderer gate[LauncherActivity]: parsed version candidate '"
                                 + candidate + "' => is117OrNewer=" + parsed
                 );
                 return parsed;
@@ -858,7 +834,7 @@ public class LauncherActivity extends BaseActivity {
             }
         } catch (Throwable t) {
             Logger.appendToLog(
-                    "Modern renderer gate [LauncherActivity]: failed to inspect current built-in renderer: " + t
+                    "Modern renderer gate[LauncherActivity]: failed to inspect current built-in renderer: " + t
             );
         }
 
@@ -1219,4 +1195,4 @@ public class LauncherActivity extends BaseActivity {
 
         binding.topLayout.setAlpha(adjustedOpacity.floatValue());
     }
-}
+            }
